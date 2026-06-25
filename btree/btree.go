@@ -25,8 +25,12 @@ const headerMagic = uint32(0xB7EE0001)
 // Why not store rootID in the pager meta page?
 //   Separating concerns: the pager doesn't need to know about B-Tree semantics,
 //   and a single file could host multiple B-Trees in the future.
+//
+// Why pager.PageStore instead of *pager.Pager?
+//   The executor injects either a raw *Pager (for DDL) or a *TxPager (for DML
+//   inside a transaction). The interface keeps BTree oblivious to WAL mechanics.
 type BTree struct {
-	pg         *pager.Pager
+	pg         pager.PageStore
 	headerPage uint32 // always 1 in a dedicated btree file
 	rootID     uint32
 }
@@ -41,7 +45,7 @@ type splitResult struct {
 // Create initialises a new empty B+ Tree in pg.
 // Allocates the header page and an initial empty leaf as the root.
 // Returns the BTree; in a fresh file the header page is always 1.
-func Create(pg *pager.Pager) (*BTree, error) {
+func Create(pg pager.PageStore) (*BTree, error) {
 	headerID, err := pg.AllocatePage()
 	if err != nil {
 		return nil, fmt.Errorf("alloc btree header page: %w", err)
@@ -65,7 +69,7 @@ func Create(pg *pager.Pager) (*BTree, error) {
 
 // Open re-opens an existing B+ Tree given its header page ID.
 // In a dedicated btree file, headerID is always 1.
-func Open(pg *pager.Pager, headerID uint32) (*BTree, error) {
+func Open(pg pager.PageStore, headerID uint32) (*BTree, error) {
 	p, err := pg.ReadPage(headerID)
 	if err != nil {
 		return nil, fmt.Errorf("read btree header (page %d): %w", headerID, err)

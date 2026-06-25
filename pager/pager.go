@@ -23,6 +23,16 @@ import (
 
 const metaPageID = uint32(0)
 
+// PageStore is the minimal read/write interface required by the B+ Tree.
+// Both *Pager (direct disk I/O) and *TxPager (transaction-buffered) satisfy it,
+// allowing the tree to operate identically under both a raw pager and a WAL
+// transaction without knowing which it is talking to.
+type PageStore interface {
+	ReadPage(id uint32) (*storage.Page, error)
+	WritePage(p *storage.Page) error
+	AllocatePage() (uint32, error)
+}
+
 // maxFreeListEntries caps how many freed page IDs we store in the meta page.
 // Each entry is 4 bytes; we reserve the first 8 bytes of the data area for
 // TotalPages and FreeCount, leaving (DataSize - 8) / 4 = 1018 slots.
