@@ -518,15 +518,24 @@ Phase 3 — SQL REPL:
   sql  <dir>   open (or create) a database directory and start the REPL
                SQL statements end with ';'; type 'quit' to exit
                Prompt shows [db*]> when an explicit transaction is open
+               \stats  show buffer pool hit/miss statistics
+
+Supported SQL:
+  CREATE TABLE t (col INT, col TEXT, ...)
+  INSERT INTO t VALUES (1, 'hello', ...)
+  SELECT [* | col, ...] FROM t [WHERE ...] [LIMIT n]
+  EXPLAIN SELECT ...    show the physical plan without executing
+  BEGIN / COMMIT / ROLLBACK
 
 Example SQL session:
   dbengine sql mydb
   [mydb]> CREATE TABLE users (id INT, name TEXT, age INT);
   [mydb]> INSERT INTO users VALUES (1, 'Alice', 30);
+  [mydb]> EXPLAIN SELECT name FROM users WHERE id > 0 AND age > 18 LIMIT 5;
+  [mydb]> SELECT name FROM users WHERE id > 0 AND age > 18 LIMIT 5;
   [mydb]> BEGIN;
   [mydb*]> INSERT INTO users VALUES (2, 'Bob', 25);
   [mydb*]> ROLLBACK;
-  [mydb]> SELECT * FROM users;
   [mydb]> quit
 `)
 }

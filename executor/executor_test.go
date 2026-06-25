@@ -372,5 +372,136 @@ func TestWALRecoveryAfterCrash(t *testing.T) {
 	}
 }
 
+// --- EXPLAIN ---
+
+func TestExplainFullScan(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+
+	mustExec(t, db, "CREATE TABLE e (id INT, name TEXT)")
+	res := mustExec(t, db, "EXPLAIN SELECT * FROM e")
+	if res.Message == "" {
+		t.Fatal("EXPLAIN returned empty message")
+	}
+	for _, want := range []string{"IndexScan", "full scan", "Project"} {
+		if !contains(res.Message, want) {
+			t.Errorf("EXPLAIN output missing %q:\n%s", want, res.Message)
+		}
+	}
+}
+
+func TestExplainPointLookup(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+
+	mustExec(t, db, "CREATE TABLE e (id INT, name TEXT)")
+	res := mustExec(t, db, "EXPLAIN SELECT * FROM e WHERE id = 42")
+	if !contains(res.Message, "point lookup") {
+		t.Errorf("expected 'point lookup' in EXPLAIN output:\n%s", res.Message)
+	}
+}
+
+func TestExplainRangeScan(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+
+	mustExec(t, db, "CREATE TABLE e (id INT, name TEXT)")
+	res := mustExec(t, db, "EXPLAIN SELECT * FROM e WHERE id > 10 AND id <= 50")
+	if !contains(res.Message, "range=[11..50]") {
+		t.Errorf("expected range bounds in EXPLAIN output:\n%s", res.Message)
+	}
+}
+
+func TestExplainFilterNode(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+
+	mustExec(t, db, "CREATE TABLE e (id INT, name TEXT)")
+	res := mustExec(t, db, "EXPLAIN SELECT * FROM e WHERE name = 'Alice'")
+	if !contains(res.Message, "Filter") {
+		t.Errorf("expected 'Filter' node in EXPLAIN output:\n%s", res.Message)
+	}
+}
+
+func TestExplainDoesNotMutate(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+
+	mustExec(t, db, "CREATE TABLE e (id INT, val TEXT)")
+	mustExec(t, db, "INSERT INTO e VALUES (1, 'x')")
+	mustExec(t, db, "EXPLAIN SELECT * FROM e")
+	res := mustExec(t, db, "SELECT * FROM e")
+	if len(res.Rows) != 1 {
+		t.Errorf("EXPLAIN must not modify the table; expected 1 row, got %d", len(res.Rows))
+	}
+}
+
+// --- LIMIT ---
+
+func TestLimitReducesRows(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+
+	mustExec(t, db, "CREATE TABLE nums (id INT)")
+	for i := 1; i <= 10; i++ {
+		mustExec(t, db, fmt.Sprintf("INSERT INTO nums VALUES (%d)", i))
+	}
+	res := mustExec(t, db, "SELECT * FROM nums LIMIT 3")
+	if len(res.Rows) != 3 {
+		t.Errorf("expected 3 rows with LIMIT 3, got %d", len(res.Rows))
+	}
+}
+
+func TestLimitLargerThanTableSize(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+
+	mustExec(t, db, "CREATE TABLE nums (id INT)")
+	for i := 1; i <= 3; i++ {
+		mustExec(t, db, fmt.Sprintf("INSERT INTO nums VALUES (%d)", i))
+	}
+	res := mustExec(t, db, "SELECT * FROM nums LIMIT 100")
+	if len(res.Rows) != 3 {
+		t.Errorf("LIMIT > table size should return all rows; got %d", len(res.Rows))
+	}
+}
+
+func TestLimitWithFilter(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+
+	mustExec(t, db, "CREATE TABLE nums (id INT, tag TEXT)")
+	for i := 1; i <= 10; i++ {
+		mustExec(t, db, fmt.Sprintf("INSERT INTO nums VALUES (%d, 'a')", i))
+	}
+	res := mustExec(t, db, "SELECT * FROM nums WHERE tag = 'a' LIMIT 4")
+	if len(res.Rows) != 4 {
+		t.Errorf("expected 4 rows, got %d", len(res.Rows))
+	}
+}
+
+func TestExplainWithLimit(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+
+	mustExec(t, db, "CREATE TABLE e (id INT)")
+	res := mustExec(t, db, "EXPLAIN SELECT * FROM e LIMIT 10")
+	if !contains(res.Message, "Limit") {
+		t.Errorf("expected 'Limit' in EXPLAIN output:\n%s", res.Message)
+	}
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr ||
+		len(s) > 0 && func() bool {
+			for i := 0; i <= len(s)-len(substr); i++ {
+				if s[i:i+len(substr)] == substr {
+					return true
+				}
+			}
+			return false
+		}())
+}
+
 // keep catalog import used
 var _ = catalog.TypeInt
