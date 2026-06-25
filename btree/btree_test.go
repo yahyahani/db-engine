@@ -217,6 +217,94 @@ func TestPersistenceAcrossReopen(t *testing.T) {
 	}
 }
 
+// TestRangeScan verifies that entries in a range are returned in sorted order
+// and that entries outside the range are excluded.
+func TestRangeScan(t *testing.T) {
+	bt, cleanup := tempBTree(t)
+	defer cleanup()
+
+	// Insert keys 0, 10, 20, ..., 990 (100 entries).
+	for i := uint64(0); i < 100; i++ {
+		bt.Insert(i*10, val(fmt.Sprintf("v%d", i*10)))
+	}
+
+	// Scan [250, 450] — should return keys 250, 260, ..., 450 (21 entries).
+	results, err := bt.RangeScan(250, 450)
+	if err != nil {
+		t.Fatalf("RangeScan: %v", err)
+	}
+	if len(results) != 21 {
+		t.Errorf("RangeScan [250,450]: got %d results, want 21", len(results))
+	}
+	// Verify sorted order and correct range.
+	for i, e := range results {
+		want := uint64(250 + i*10)
+		if e.Key != want {
+			t.Errorf("results[%d].Key = %d, want %d", i, e.Key, want)
+		}
+	}
+}
+
+// TestRangeScanExactBoundaries verifies inclusive boundary behaviour.
+func TestRangeScanExactBoundaries(t *testing.T) {
+	bt, cleanup := tempBTree(t)
+	defer cleanup()
+
+	for i := uint64(1); i <= 5; i++ {
+		bt.Insert(i, val(fmt.Sprintf("v%d", i)))
+	}
+
+	results, _ := bt.RangeScan(2, 4)
+	if len(results) != 3 {
+		t.Fatalf("RangeScan [2,4]: got %d results, want 3", len(results))
+	}
+	if results[0].Key != 2 || results[2].Key != 4 {
+		t.Errorf("boundary keys wrong: got %d..%d, want 2..4",
+			results[0].Key, results[2].Key)
+	}
+}
+
+// TestRangeScanAcrossLeafBoundary inserts enough entries to span multiple leaf
+// pages and verifies range scan follows the NextLeaf chain correctly.
+func TestRangeScanAcrossLeafBoundary(t *testing.T) {
+	bt, cleanup := tempBTree(t)
+	defer cleanup()
+
+	// Insert 3× LeafOrder entries to guarantee multiple leaf pages.
+	n := uint64(LeafOrder * 3)
+	for i := uint64(0); i < n; i++ {
+		bt.Insert(i, val(fmt.Sprintf("v%d", i)))
+	}
+
+	results, err := bt.RangeScan(0, n-1)
+	if err != nil {
+		t.Fatalf("RangeScan: %v", err)
+	}
+	if uint64(len(results)) != n {
+		t.Errorf("full range scan: got %d results, want %d", len(results), n)
+	}
+	for i, e := range results {
+		if e.Key != uint64(i) {
+			t.Errorf("results[%d].Key = %d, want %d", i, e.Key, i)
+			break
+		}
+	}
+}
+
+// TestRangeScanEmpty verifies that a scan with no matching keys returns nil/empty.
+func TestRangeScanEmpty(t *testing.T) {
+	bt, cleanup := tempBTree(t)
+	defer cleanup()
+
+	bt.Insert(10, val("ten"))
+	bt.Insert(20, val("twenty"))
+
+	results, _ := bt.RangeScan(50, 100) // entirely outside inserted range
+	if len(results) != 0 {
+		t.Errorf("expected empty result, got %d entries", len(results))
+	}
+}
+
 // TestOpenBadHeaderFails ensures Open rejects a file that isn't a btree.
 func TestOpenBadHeaderFails(t *testing.T) {
 	f, err := os.CreateTemp("", "btree-bad-*.db")

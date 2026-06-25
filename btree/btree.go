@@ -146,6 +146,71 @@ func (bt *BTree) Search(key uint64) ([ValueSize]byte, bool, error) {
 	}
 }
 
+// RangeScan returns all entries where minKey ≤ key ≤ maxKey, in ascending order.
+//
+// How it works:
+//  1. Walk the tree from root to the leftmost leaf that could contain minKey.
+//     (Same traversal as Search, using FindChildIndex.)
+//  2. Scan that leaf's entries, collecting those in [minKey, maxKey].
+//  3. Follow NextLeaf pointers to adjacent leaves until we pass maxKey or run
+//     out of leaves.
+//
+// Why is this efficient?
+//   Because all data is in the leaves and leaves form a sorted linked list,
+//   range scans are O(log n + k) where k is the number of results.
+//   A plain B-Tree would require O(log n + k·log n) for in-order traversal.
+func (bt *BTree) RangeScan(minKey, maxKey uint64) ([]Entry, error) {
+	if minKey > maxKey {
+		return nil, nil
+	}
+
+	// Step 1: navigate to the first leaf that could contain minKey.
+	nodeID := bt.rootID
+	for {
+		p, err := bt.pg.ReadPage(nodeID)
+		if err != nil {
+			return nil, fmt.Errorf("read node %d: %w", nodeID, err)
+		}
+		if PageNodeType(p) == NodeTypeLeaf {
+			break
+		}
+		internal, err := DecodeInternal(p)
+		if err != nil {
+			return nil, err
+		}
+		nodeID = internal.Children[FindChildIndex(internal.Keys, minKey)]
+	}
+
+	// Step 2: scan the leaf chain.
+	var results []Entry
+	for nodeID != 0 {
+		p, err := bt.pg.ReadPage(nodeID)
+		if err != nil {
+			return nil, fmt.Errorf("read leaf %d: %w", nodeID, err)
+		}
+		leaf, err := DecodeLeaf(p)
+		if err != nil {
+			return nil, err
+		}
+
+		done := false
+		for _, e := range leaf.Entries {
+			if e.Key > maxKey {
+				done = true
+				break
+			}
+			if e.Key >= minKey {
+				results = append(results, e)
+			}
+		}
+		if done {
+			break
+		}
+		nodeID = leaf.NextLeaf
+	}
+	return results, nil
+}
+
 // RootID exposes the root page ID for info/debug commands.
 func (bt *BTree) RootID() uint32 { return bt.rootID }
 
