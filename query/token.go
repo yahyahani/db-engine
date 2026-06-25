@@ -22,6 +22,8 @@ const (
 	TokBegin    // transaction control
 	TokCommit
 	TokRollback
+	TokExplain // EXPLAIN
+	TokLimit   // LIMIT
 
 	// Literals
 	TokIdent  // unquoted identifier: table name, column name

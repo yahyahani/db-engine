@@ -70,6 +70,8 @@ func (p *parser) parseStatement() (Statement, error) {
 		return p.parseInsert()
 	case TokSelect:
 		return p.parseSelect()
+	case TokExplain:
+		return p.parseExplain()
 	case TokBegin:
 		p.consume()
 		return &BeginStmt{}, nil
@@ -80,7 +82,7 @@ func (p *parser) parseStatement() (Statement, error) {
 		p.consume()
 		return &RollbackStmt{}, nil
 	default:
-		return nil, fmt.Errorf("expected SELECT, INSERT, CREATE, BEGIN, COMMIT, or ROLLBACK — got %q", p.peek().Text)
+		return nil, fmt.Errorf("expected SELECT, INSERT, CREATE, EXPLAIN, BEGIN, COMMIT, or ROLLBACK — got %q", p.peek().Text)
 	}
 }
 
@@ -203,7 +205,31 @@ func (p *parser) parseSelect() (*SelectStmt, error) {
 		}
 		stmt.Where = where
 	}
+	if p.peek().Kind == TokLimit {
+		p.consume()
+		n, err := p.expect(TokIntLit)
+		if err != nil {
+			return nil, fmt.Errorf("LIMIT: expected integer")
+		}
+		if n.IntVal == 0 {
+			return nil, fmt.Errorf("LIMIT: value must be positive, got 0")
+		}
+		stmt.Limit = int(n.IntVal)
+	}
 	return stmt, nil
+}
+
+// parseExplain parses: EXPLAIN SELECT ...
+func (p *parser) parseExplain() (*ExplainStmt, error) {
+	p.consume() // EXPLAIN
+	if p.peek().Kind != TokSelect {
+		return nil, fmt.Errorf("EXPLAIN: expected SELECT, got %q", p.peek().Text)
+	}
+	inner, err := p.parseSelect()
+	if err != nil {
+		return nil, fmt.Errorf("EXPLAIN: %w", err)
+	}
+	return &ExplainStmt{Inner: inner}, nil
 }
 
 func (p *parser) parseWhere() (*WhereClause, error) {

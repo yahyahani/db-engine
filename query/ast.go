@@ -25,8 +25,6 @@ type Condition struct {
 }
 
 // WhereClause holds one or more conditions combined by AND.
-// Phase 3 supports only AND (not OR). OR requires a more complex query planner
-// that can union multiple index scans — that's Phase 6 territory.
 type WhereClause struct {
 	Conds []Condition
 }
@@ -46,14 +44,22 @@ type InsertStmt struct {
 	Values    []catalog.Value
 }
 
-// SelectStmt represents: SELECT cols FROM name [WHERE ...]
+// SelectStmt represents: SELECT cols FROM name [WHERE ...] [LIMIT n]
 //
 // Columns is ["*"] for SELECT *, or a list of column names.
 // Where is nil if there is no WHERE clause.
+// Limit is 0 (no limit) or a positive row count.
 type SelectStmt struct {
 	TableName string
 	Columns   []string
 	Where     *WhereClause
+	Limit     int
+}
+
+// ExplainStmt represents: EXPLAIN SELECT ...
+// It prints the physical plan without executing the query.
+type ExplainStmt struct {
+	Inner *SelectStmt
 }
 
 // BeginStmt represents BEGIN — start an explicit transaction.
@@ -68,6 +74,7 @@ type RollbackStmt struct{}
 func (*CreateTableStmt) stmtNode() {}
 func (*InsertStmt) stmtNode()      {}
 func (*SelectStmt) stmtNode()      {}
+func (*ExplainStmt) stmtNode()     {}
 func (*BeginStmt) stmtNode()       {}
 func (*CommitStmt) stmtNode()      {}
 func (*RollbackStmt) stmtNode()    {}

@@ -25,6 +25,8 @@ var keywords = map[string]TokenKind{
 	"begin":    TokBegin,
 	"commit":   TokCommit,
 	"rollback": TokRollback,
+	"explain":  TokExplain,
+	"limit":    TokLimit,
 }
 
 // Tokenize converts a SQL string into a flat slice of Tokens.
