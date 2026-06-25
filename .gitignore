@@ -1,0 +1,20 @@
+# Compiled binaries
+/dbengine
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+*.test
+*.out
+
+# Database files created during testing or demo
+*.db
+
+# Go toolchain cache
+/vendor/
+
+# macOS
+.DS_Store
