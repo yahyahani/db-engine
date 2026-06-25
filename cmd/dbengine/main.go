@@ -1,22 +1,32 @@
 // Command dbengine is a small interactive CLI for manually exercising the Phase 1
-// storage engine. It is not part of the engine itself — it's a learning tool so
-// you can poke at pages directly without writing test code.
+// storage engine (raw pages) and the Phase 2 B+ Tree index.
+// It is not part of the engine itself — it's a learning tool.
 //
-// Usage:
+// Phase 1 (raw page) commands:
 //
-//	dbengine init   <file>                  create a new database file
-//	dbengine info   <file>                  show meta page statistics
-//	dbengine alloc  <file>                  allocate a new page, print its ID
-//	dbengine write  <file> <id> <data>      write a string into a page
-//	dbengine read   <file> <id>             print the contents of a page
-//	dbengine free   <file> <id>             free a page for re-use
+//	dbengine init         <file>              create a new database file
+//	dbengine info         <file>              show meta page statistics
+//	dbengine alloc        <file>              allocate a new page, print its ID
+//	dbengine write        <file> <id> <data>  write a string into a page
+//	dbengine read         <file> <id>         print the contents of a page
+//	dbengine free         <file> <id>         free a page for re-use
+//
+// Phase 2 (B+ Tree) commands — use a dedicated btree file:
+//
+//	dbengine btree-init   <file>              initialise a new B+ Tree file
+//	dbengine btree-set    <file> <key> <val>  insert or update a key
+//	dbengine btree-get    <file> <key>        point lookup
+//	dbengine btree-scan   <file> <min> <max>  range scan (inclusive)
+//	dbengine btree-info   <file>              print tree metadata
 package main
 
 import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
+	"github.com/yahya/db-engine/btree"
 	"github.com/yahya/db-engine/pager"
 	"github.com/yahya/db-engine/storage"
 )
@@ -31,6 +41,7 @@ func main() {
 	file := os.Args[2]
 
 	switch cmd {
+	// Phase 1: raw page commands
 	case "init":
 		runInit(file)
 	case "info":
@@ -46,6 +57,20 @@ func main() {
 	case "free":
 		requireArgs(3, "dbengine free <file> <id>")
 		runFree(file, os.Args[3])
+	// Phase 2: B+ Tree commands
+	case "btree-init":
+		runBTreeInit(file)
+	case "btree-set":
+		requireArgs(4, "dbengine btree-set <file> <key> <value>")
+		runBTreeSet(file, os.Args[3], os.Args[4])
+	case "btree-get":
+		requireArgs(3, "dbengine btree-get <file> <key>")
+		runBTreeGet(file, os.Args[3])
+	case "btree-scan":
+		requireArgs(4, "dbengine btree-scan <file> <min> <max>")
+		runBTreeScan(file, os.Args[3], os.Args[4])
+	case "btree-info":
+		runBTreeInfo(file)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %q\n\n", cmd)
 		printUsage()
@@ -144,6 +169,106 @@ func runFree(file, idStr string) {
 	fmt.Printf("page %d freed (will be reused on next alloc)\n", id)
 }
 
+// --- Phase 2: B+ Tree commands ---
+
+// runBTreeInit creates a new B+ Tree database file.
+func runBTreeInit(file string) {
+	pg := mustOpen(file)
+	defer mustClose(pg)
+	if _, err := btree.Create(pg); err != nil {
+		die("btree-init: %v", err)
+	}
+	fmt.Printf("initialised B+ Tree: %s\n", file)
+	fmt.Printf("  leaf capacity:     %d entries/page\n", btree.LeafOrder)
+	fmt.Printf("  internal capacity: %d keys/page\n", btree.InternalOrder)
+	fmt.Printf("  value size:        %d bytes\n", btree.ValueSize)
+}
+
+// runBTreeSet inserts or updates key → value in the tree.
+func runBTreeSet(file, keyStr, valueStr string) {
+	key := mustParseUint64(keyStr)
+	pg := mustOpen(file)
+	defer mustClose(pg)
+	bt := mustBTreeOpen(pg)
+
+	var value [btree.ValueSize]byte
+	copy(value[:], valueStr)
+	if err := bt.Insert(key, value); err != nil {
+		die("btree-set: %v", err)
+	}
+	fmt.Printf("set key %d\n", key)
+}
+
+// runBTreeGet looks up a single key and prints its value.
+func runBTreeGet(file, keyStr string) {
+	key := mustParseUint64(keyStr)
+	pg := mustOpen(file)
+	defer mustClose(pg)
+	bt := mustBTreeOpen(pg)
+
+	value, found, err := bt.Search(key)
+	if err != nil {
+		die("btree-get: %v", err)
+	}
+	if !found {
+		fmt.Printf("key %d: not found\n", key)
+		return
+	}
+	// Trim trailing zero bytes for readable output.
+	fmt.Printf("key %d: %q\n", key, strings.TrimRight(string(value[:]), "\x00"))
+}
+
+// runBTreeScan prints all entries in [min, max] in ascending order.
+func runBTreeScan(file, minStr, maxStr string) {
+	minKey := mustParseUint64(minStr)
+	maxKey := mustParseUint64(maxStr)
+	pg := mustOpen(file)
+	defer mustClose(pg)
+	bt := mustBTreeOpen(pg)
+
+	entries, err := bt.RangeScan(minKey, maxKey)
+	if err != nil {
+		die("btree-scan: %v", err)
+	}
+	if len(entries) == 0 {
+		fmt.Printf("no entries in range [%d, %d]\n", minKey, maxKey)
+		return
+	}
+	fmt.Printf("%d entries in [%d, %d]:\n", len(entries), minKey, maxKey)
+	for _, e := range entries {
+		v := strings.TrimRight(string(e.Value[:]), "\x00")
+		fmt.Printf("  %d → %q\n", e.Key, v)
+	}
+}
+
+// runBTreeInfo prints B+ Tree metadata.
+func runBTreeInfo(file string) {
+	pg := mustOpen(file)
+	defer mustClose(pg)
+	bt := mustBTreeOpen(pg)
+
+	fmt.Printf("file:          %s\n", file)
+	fmt.Printf("root page ID:  %d\n", bt.RootID())
+	fmt.Printf("total pages:   %d  (%d KiB on disk)\n",
+		pg.TotalPages(), int64(pg.TotalPages())*4)
+}
+
+func mustBTreeOpen(pg *pager.Pager) *btree.BTree {
+	bt, err := btree.Open(pg, 1) // header page is always 1 in a dedicated btree file
+	if err != nil {
+		die("open btree: %v", err)
+	}
+	return bt
+}
+
+func mustParseUint64(s string) uint64 {
+	n, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		die("invalid key %q: must be a non-negative integer", s)
+	}
+	return n
+}
+
 // --- helpers ---
 
 func mustOpen(file string) *pager.Pager {
@@ -194,22 +319,31 @@ func die(format string, args ...any) {
 }
 
 func printUsage() {
-	fmt.Print(`dbengine — Phase 1 storage engine demo
+	fmt.Print(`dbengine — storage engine demo (Phase 1 + Phase 2)
 
-Usage:
-  dbengine init   <file>                 create a new database file
-  dbengine info   <file>                 show page count and free list
-  dbengine alloc  <file>                 allocate a new page, print its ID
-  dbengine write  <file> <id> <data>     write a string into a page
-  dbengine read   <file> <id>            print the data in a page
-  dbengine free   <file> <id>            free a page for re-use
+Phase 1 — raw page commands:
+  init   <file>                 create a new database file
+  info   <file>                 show page count and free list
+  alloc  <file>                 allocate a new page, print its ID
+  write  <file> <id> <data>     write a string into a page
+  read   <file> <id>            print the data in a page
+  free   <file> <id>            free a page for re-use
 
-Example session:
-  dbengine init   mydb.db
-  dbengine alloc  mydb.db        # → ID 1
-  dbengine write  mydb.db 1 "hello world"
-  dbengine read   mydb.db 1
-  # restart: kill and re-run
-  dbengine read   mydb.db 1      # data is still there
+Phase 2 — B+ Tree commands (use a separate file):
+  btree-init  <file>                  create a new B+ Tree file
+  btree-set   <file> <key> <value>    insert or update a key
+  btree-get   <file> <key>            look up a key
+  btree-scan  <file> <min> <max>      range scan (inclusive)
+  btree-info  <file>                  print tree metadata
+
+Example B+ Tree session:
+  dbengine btree-init  index.db
+  dbengine btree-set   index.db 1 "Alice"
+  dbengine btree-set   index.db 2 "Bob"
+  dbengine btree-set   index.db 3 "Charlie"
+  dbengine btree-get   index.db 2
+  dbengine btree-scan  index.db 1 3
+  # restart — data persists
+  dbengine btree-get   index.db 1
 `)
 }
