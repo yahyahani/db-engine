@@ -13,19 +13,22 @@
 //     2. Execute the statement against a TxPager (no-steal: dirty pages buffered)
 //     3. Log Write records (after-images) for every dirty page
 //     4. Log Commit record + fsync WAL  ← durability point
-//     5. Flush dirty pages to the data file
+//     5. TxPager.Flush() → BufPager.WritePage (write-through: disk + pool)
 //
-//   If the process crashes between steps 4 and 5, the WAL replay on next Open()
+//   If the process crashes between steps 4 and 5, WAL replay on next Open()
 //   re-applies the committed writes.  If it crashes before step 4, there is no
 //   Commit record and recovery skips those writes entirely.
 //
 //   Explicit transactions (BEGIN / COMMIT / ROLLBACK) keep TxPagers open across
 //   multiple statements and commit all dirty pages atomically at COMMIT.
 //
-// Why separate planning (planKeyRange) from execution (scan)?
-//   Even in this minimal implementation, separating "what range to read" from
-//   "actually reading it" is the seed of a query planner. Phase 6 will expand
-//   this into a proper plan tree with cost estimates.
+// Buffer pool (Phase 5)
+//
+//   DB owns a single *bufferpool.Pool shared across all open table files.
+//   Table pagers stay open for the DB lifetime so the pool survives across
+//   statements — repeated SELECTs on the same table hit cache instead of disk.
+//   All reads go through BufPager (pool → disk on miss).
+//   All committed writes go through BufPager.WritePage (write-through: disk + pool).
 package executor
 
 import (
@@ -37,6 +40,7 @@ import (
 	"strings"
 
 	"github.com/yahya/db-engine/btree"
+	"github.com/yahya/db-engine/bufferpool"
 	"github.com/yahya/db-engine/catalog"
 	"github.com/yahya/db-engine/pager"
 	"github.com/yahya/db-engine/query"
@@ -49,22 +53,33 @@ const (
 	textColSize = 48 // bytes per TEXT column; max 47 printable chars + null
 )
 
+// openTable tracks a table that has been opened for the duration of this DB session.
+type openTable struct {
+	pg  *pager.Pager
+	fid uint16
+	bp  *bufferpool.BufPager
+}
+
 // DB is an open database backed by a directory.
 // Each table has its own B+ Tree file (<dir>/<table>.db).
 // The schema for all tables is in <dir>/catalog.
 // The WAL is in <dir>/wal.
+// Table pagers stay open for the lifetime of the DB so the buffer pool can
+// serve repeated reads without reopening files.
 type DB struct {
 	dir      string
 	catalog  *catalog.Catalog
 	wal      *wal.WAL
-	activeTx *activeTx // non-nil when an explicit BEGIN is in progress
+	pool     *bufferpool.Pool
+	openTbls map[string]*openTable // lowercase table name → open table
+	activeTx *activeTx             // non-nil when an explicit BEGIN is in progress
 }
 
 // activeTx holds the state of an explicit transaction across multiple statements.
+// bases was removed in Phase 5: table pagers are now owned by DB.openTbls.
 type activeTx struct {
 	xid    uint32
 	pagers map[string]*pager.TxPager // lowercase table name → TxPager
-	bases  map[string]*pager.Pager   // lowercase table name → underlying Pager (kept open)
 }
 
 // Result is returned by Exec for every statement.
@@ -76,7 +91,8 @@ type Result struct {
 	Message string
 }
 
-// Open opens (or creates) a database at dir and runs WAL crash recovery.
+// Open opens (or creates) a database at dir, runs WAL crash recovery, and
+// initialises the shared buffer pool.
 func Open(dir string) (*DB, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("create database directory %q: %w", dir, err)
@@ -86,7 +102,6 @@ func Open(dir string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open WAL: %w", err)
 	}
-	// Redo any committed writes that did not reach the data files before a crash.
 	if err := w.Recover(dir); err != nil {
 		_ = w.Close()
 		return nil, fmt.Errorf("WAL recovery: %w", err)
@@ -97,20 +112,35 @@ func Open(dir string) (*DB, error) {
 		_ = w.Close()
 		return nil, fmt.Errorf("load catalog: %w", err)
 	}
-	return &DB{dir: dir, catalog: cat, wal: w}, nil
+
+	return &DB{
+		dir:      dir,
+		catalog:  cat,
+		wal:      w,
+		pool:     bufferpool.New(bufferpool.DefaultCapacity),
+		openTbls: make(map[string]*openTable),
+	}, nil
 }
 
-// Close rolls back any open transaction, syncs the WAL, and releases file handles.
+// Close rolls back any open transaction, closes all table pagers, and syncs the WAL.
 func (db *DB) Close() error {
 	if db.activeTx != nil {
 		_ = db.rollbackTx(db.activeTx)
 		db.activeTx = nil
+	}
+	for key, ot := range db.openTbls {
+		db.pool.Unregister(ot.fid)
+		_ = ot.pg.Close()
+		delete(db.openTbls, key)
 	}
 	return db.wal.Close()
 }
 
 // InTransaction reports whether an explicit BEGIN is in progress.
 func (db *DB) InTransaction() bool { return db.activeTx != nil }
+
+// PoolStats returns a snapshot of buffer pool metrics.
+func (db *DB) PoolStats() bufferpool.Stats { return db.pool.Stats() }
 
 // Exec parses and executes a SQL statement.
 func (db *DB) Exec(sql string) (*Result, error) {
@@ -149,7 +179,6 @@ func (db *DB) execBegin() (*Result, error) {
 	db.activeTx = &activeTx{
 		xid:    xid,
 		pagers: make(map[string]*pager.TxPager),
-		bases:  make(map[string]*pager.Pager),
 	}
 	return &Result{Message: "BEGIN"}, nil
 }
@@ -175,9 +204,9 @@ func (db *DB) execRollback() (*Result, error) {
 	return &Result{Message: "ROLLBACK"}, db.rollbackTx(tx)
 }
 
-// commitTx logs all dirty pages to the WAL, fsyncs, flushes them to disk, then logs COMMIT.
+// commitTx logs all dirty pages to the WAL, fsyncs, then flushes them via BufPager
+// (write-through: disk + pool update in one step).
 func (db *DB) commitTx(tx *activeTx) error {
-	// Log write records for every dirty page in every table.
 	for tableName, txpg := range tx.pagers {
 		fileName := tableName + ".db"
 		for _, page := range txpg.DirtyPages() {
@@ -190,22 +219,15 @@ func (db *DB) commitTx(tx *activeTx) error {
 			}
 		}
 	}
-	// Commit record + fsync: this is the durability point.
-	// After Sync() returns, the transaction survives any subsequent crash.
 	if err := db.wal.AppendCommit(tx.xid); err != nil {
 		return err
 	}
 	if err := db.wal.Sync(); err != nil {
 		return err
 	}
-	// Flush dirty pages to the data files (force policy).
+	// Flush dirty pages via BufPager (write-through: disk first, then pool update).
 	for _, txpg := range tx.pagers {
 		if err := txpg.Flush(); err != nil {
-			return err
-		}
-	}
-	for _, pg := range tx.bases {
-		if err := pg.Close(); err != nil {
 			return err
 		}
 	}
@@ -216,35 +238,48 @@ func (db *DB) rollbackTx(tx *activeTx) error {
 	for _, txpg := range tx.pagers {
 		_ = txpg.Rollback()
 	}
-	for _, pg := range tx.bases {
-		_ = pg.Close()
-	}
 	return db.wal.AppendRollback(tx.xid)
 }
 
-// txPagerForTable returns the TxPager for the given table in the active transaction,
-// creating one (and opening the base Pager) on first access.
-func (db *DB) txPagerForTable(tableName string) (*pager.TxPager, error) {
-	key := strings.ToLower(tableName)
+// getOrOpenTable returns the BufPager for the named table, opening the pager
+// and registering it with the pool on first access.  The pager stays open for
+// the DB lifetime so cached pages survive across statements.
+func (db *DB) getOrOpenTable(name string) (*bufferpool.BufPager, error) {
+	key := strings.ToLower(name)
+	if ot, ok := db.openTbls[key]; ok {
+		return ot.bp, nil
+	}
+	pg, err := pager.Open(db.tablePath(name))
+	if err != nil {
+		return nil, fmt.Errorf("open table %q: %w", name, err)
+	}
+	fid := db.pool.Register(pg)
+	bp := bufferpool.NewBufPager(db.pool, pg, fid)
+	db.openTbls[key] = &openTable{pg: pg, fid: fid, bp: bp}
+	return bp, nil
+}
+
+// txPagerForTable returns the TxPager for the named table in the active
+// transaction, wrapping a BufPager on first access so reads hit the pool.
+func (db *DB) txPagerForTable(name string) (*pager.TxPager, error) {
+	key := strings.ToLower(name)
 	if txpg, ok := db.activeTx.pagers[key]; ok {
 		return txpg, nil
 	}
-	pg, err := pager.Open(db.tablePath(tableName))
+	bp, err := db.getOrOpenTable(name)
 	if err != nil {
-		return nil, fmt.Errorf("open table file for tx: %w", err)
+		return nil, err
 	}
-	txpg := pager.NewTxPager(pg)
+	txpg := pager.NewTxPager(bp)
 	db.activeTx.pagers[key] = txpg
-	db.activeTx.bases[key] = pg
 	return txpg, nil
 }
 
 // --- CREATE TABLE ---
 
 // execCreate is DDL: always auto-commits outside any explicit transaction.
-// We do not WAL-protect the btree file creation — if it fails mid-way the user
-// can retry. The catalog is written after the btree file is ready to avoid a
-// phantom table with no backing file.
+// The btree file is created using a raw pager (not pool-backed) for simplicity;
+// the pool will cache its pages on the first DML access.
 func (db *DB) execCreate(s *query.CreateTableStmt) (*Result, error) {
 	tbl := &catalog.Table{Name: s.TableName, Columns: s.Columns}
 	if err := validateSchema(tbl); err != nil {
@@ -292,7 +327,7 @@ func (db *DB) execInsert(s *query.InsertStmt) (*Result, error) {
 	encoded := encodeRow(tbl, s.Values)
 
 	if db.activeTx != nil {
-		// Inside explicit transaction: buffer writes via TxPager.
+		// Inside an explicit transaction: buffer writes via TxPager.
 		txpg, err := db.txPagerForTable(s.TableName)
 		if err != nil {
 			return nil, err
@@ -307,48 +342,43 @@ func (db *DB) execInsert(s *query.InsertStmt) (*Result, error) {
 		return &Result{Message: "1 row inserted"}, nil
 	}
 
-	// Auto-commit: wrap the single INSERT in a full WAL transaction.
 	return db.autoCommitInsert(s.TableName, key, encoded)
 }
 
-// autoCommitInsert wraps a single INSERT in a WAL transaction:
-//   AllocXID → insert into TxPager → log writes → log commit → fsync → flush pages
+// autoCommitInsert wraps a single INSERT in a full WAL transaction.
+// The BufPager (pool) is the base for the TxPager so that committed pages
+// end up in the pool after Flush, making subsequent reads pool hits.
 func (db *DB) autoCommitInsert(tableName string, key uint64, encoded [btree.ValueSize]byte) (*Result, error) {
 	xid, err := db.wal.AllocXID()
 	if err != nil {
 		return nil, err
 	}
 
-	pg, err := pager.Open(db.tablePath(tableName))
+	bp, err := db.getOrOpenTable(tableName)
 	if err != nil {
 		_ = db.wal.AppendRollback(xid)
-		return nil, fmt.Errorf("open table file: %w", err)
+		return nil, err
 	}
 
-	txpg := pager.NewTxPager(pg)
+	txpg := pager.NewTxPager(bp)
 	bt, err := btree.Open(txpg, 1)
 	if err != nil {
 		_ = txpg.Rollback()
-		_ = pg.Close()
 		_ = db.wal.AppendRollback(xid)
 		return nil, fmt.Errorf("open B+ Tree: %w", err)
 	}
 
 	if err := bt.Insert(key, encoded); err != nil {
 		_ = txpg.Rollback()
-		_ = pg.Close()
 		_ = db.wal.AppendRollback(xid)
 		return nil, fmt.Errorf("insert: %w", err)
 	}
 
-	// Commit: log dirty pages → log commit → fsync → flush.
-	singleTx := &activeTx{
+	tx := &activeTx{
 		xid:    xid,
 		pagers: map[string]*pager.TxPager{strings.ToLower(tableName): txpg},
-		bases:  map[string]*pager.Pager{strings.ToLower(tableName): pg},
 	}
-	if err := db.commitTx(singleTx); err != nil {
-		// commitTx closes bases; rollback the TxPager dirty buffer.
+	if err := db.commitTx(tx); err != nil {
 		_ = txpg.Rollback()
 		return nil, err
 	}
@@ -370,13 +400,20 @@ func (db *DB) execSelect(s *query.SelectStmt) (*Result, error) {
 
 	minKey, maxKey := planKeyRange(tbl, s.Where)
 
-	// Choose a PageStore: TxPager (reads own uncommitted writes) inside a tx,
-	// or a freshly opened base Pager outside one.
-	ps, closePS, err := db.getReadStore(s.TableName)
-	if err != nil {
-		return nil, err
+	// Inside an explicit transaction: use the TxPager (read-your-own-writes).
+	// Outside: use BufPager directly (pool-cached reads).
+	var ps pager.PageStore
+	if db.activeTx != nil {
+		ps, err = db.txPagerForTable(s.TableName)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		ps, err = db.getOrOpenTable(s.TableName)
+		if err != nil {
+			return nil, err
+		}
 	}
-	defer closePS()
 
 	bt, err := btree.Open(ps, 1)
 	if err != nil {
@@ -403,31 +440,8 @@ func (db *DB) execSelect(s *query.SelectStmt) (*Result, error) {
 	return res, nil
 }
 
-// getReadStore returns a PageStore appropriate for a read operation.
-// Inside an explicit transaction, returns the TxPager (for read-your-own-writes).
-// Outside a transaction, opens and returns a fresh base Pager.
-func (db *DB) getReadStore(tableName string) (pager.PageStore, func(), error) {
-	if db.activeTx != nil {
-		txpg, err := db.txPagerForTable(tableName)
-		if err != nil {
-			return nil, nil, err
-		}
-		return txpg, func() {}, nil
-	}
-	pg, err := pager.Open(db.tablePath(tableName))
-	if err != nil {
-		return nil, nil, fmt.Errorf("open table file: %w", err)
-	}
-	return pg, func() { _ = pg.Close() }, nil
-}
-
 // planKeyRange computes the tightest (minKey, maxKey) range implied by the
-// WHERE conditions on the primary key column. If there is no WHERE or no PK
-// condition, it returns (0, MaxUint64) = full table scan.
-//
-// Example: WHERE id >= 10 AND id < 20 → (10, 19)
-// Example: WHERE id = 5             → (5, 5) — point lookup via range scan
-// Example: WHERE name = 'Alice'     → (0, MaxUint64) — full scan, post-filter
+// WHERE conditions on the primary key column.
 func planKeyRange(tbl *catalog.Table, where *query.WhereClause) (minKey, maxKey uint64) {
 	minKey, maxKey = 0, math.MaxUint64
 	if where == nil {
@@ -452,7 +466,7 @@ func planKeyRange(tbl *catalog.Table, where *query.WhereClause) (minKey, maxKey 
 			if v < math.MaxUint64 {
 				minKey = max64(minKey, v+1)
 			} else {
-				minKey, maxKey = 1, 0 // empty range
+				minKey, maxKey = 1, 0
 			}
 		case query.OpGte:
 			minKey = max64(minKey, v)
@@ -460,7 +474,7 @@ func planKeyRange(tbl *catalog.Table, where *query.WhereClause) (minKey, maxKey 
 			if v > 0 {
 				maxKey = min64(maxKey, v-1)
 			} else {
-				minKey, maxKey = 1, 0 // empty range (nothing < 0 for uint)
+				minKey, maxKey = 1, 0
 			}
 		case query.OpLte:
 			maxKey = min64(maxKey, v)
@@ -469,7 +483,6 @@ func planKeyRange(tbl *catalog.Table, where *query.WhereClause) (minKey, maxKey 
 	return
 }
 
-// rowMatchesWhere tests whether a decoded row satisfies all WHERE conditions.
 func rowMatchesWhere(row []catalog.Value, tbl *catalog.Table, where *query.WhereClause) bool {
 	for _, cond := range where.Conds {
 		idx := tbl.ColIndex(cond.Column)
@@ -519,7 +532,6 @@ func matchCondition(v catalog.Value, cond query.Condition) bool {
 	return false
 }
 
-// resolveColumns maps SELECT column list to schema indices.
 func resolveColumns(tbl *catalog.Table, cols []string) ([]string, []int, error) {
 	if len(cols) == 1 && cols[0] == "*" {
 		names := make([]string, len(tbl.Columns))

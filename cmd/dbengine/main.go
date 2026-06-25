@@ -313,6 +313,21 @@ func runSQL(dir string) {
 			fmt.Println("bye.")
 			break
 		}
+		if trimmed == `\stats` {
+			s := db.PoolStats()
+			ratio := 0.0
+			if total := s.Hits + s.Misses; total > 0 {
+				ratio = float64(s.Hits) / float64(total) * 100
+			}
+			fmt.Printf("buffer pool stats:\n")
+			fmt.Printf("  hits:      %d\n", s.Hits)
+			fmt.Printf("  misses:    %d\n", s.Misses)
+			fmt.Printf("  hit rate:  %.1f%%\n", ratio)
+			fmt.Printf("  evictions: %d\n", s.Evictions)
+			fmt.Printf("  cached:    %d / %d pages\n", s.Cached, s.Capacity)
+			fmt.Println()
+			continue
+		}
 		if trimmed == "" {
 			continue
 		}
