@@ -33,6 +33,15 @@ type PageStore interface {
 	AllocatePage() (uint32, error)
 }
 
+// FullStore extends PageStore with page lifecycle operations used by TxPager.
+// TxPager.Rollback must be able to return allocated pages to the free list;
+// the FreePage method provides that capability regardless of whether the
+// underlying store is a raw *Pager or a buffer-pool-backed BufPager.
+type FullStore interface {
+	PageStore
+	FreePage(id uint32) error
+}
+
 // maxFreeListEntries caps how many freed page IDs we store in the meta page.
 // Each entry is 4 bytes; we reserve the first 8 bytes of the data area for
 // TotalPages and FreeCount, leaving (DataSize - 8) / 4 = 1018 slots.
