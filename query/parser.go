@@ -70,8 +70,17 @@ func (p *parser) parseStatement() (Statement, error) {
 		return p.parseInsert()
 	case TokSelect:
 		return p.parseSelect()
+	case TokBegin:
+		p.consume()
+		return &BeginStmt{}, nil
+	case TokCommit:
+		p.consume()
+		return &CommitStmt{}, nil
+	case TokRollback:
+		p.consume()
+		return &RollbackStmt{}, nil
 	default:
-		return nil, fmt.Errorf("expected SELECT, INSERT, or CREATE — got %q", p.peek().Text)
+		return nil, fmt.Errorf("expected SELECT, INSERT, CREATE, BEGIN, COMMIT, or ROLLBACK — got %q", p.peek().Text)
 	}
 }
 

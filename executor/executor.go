@@ -5,6 +5,23 @@
 //   SQL string → Parse() → *SelectStmt → planKeyRange() → RangeScan/Search
 //               → decode rows → post-filter → project columns → Result
 //
+// Transaction model (Phase 4)
+//
+//   Each INSERT is protected by a WAL transaction.  The flow for a write:
+//
+//     1. AllocXID — log a Begin record to the WAL
+//     2. Execute the statement against a TxPager (no-steal: dirty pages buffered)
+//     3. Log Write records (after-images) for every dirty page
+//     4. Log Commit record + fsync WAL  ← durability point
+//     5. Flush dirty pages to the data file
+//
+//   If the process crashes between steps 4 and 5, the WAL replay on next Open()
+//   re-applies the committed writes.  If it crashes before step 4, there is no
+//   Commit record and recovery skips those writes entirely.
+//
+//   Explicit transactions (BEGIN / COMMIT / ROLLBACK) keep TxPagers open across
+//   multiple statements and commit all dirty pages atomically at COMMIT.
+//
 // Why separate planning (planKeyRange) from execution (scan)?
 //   Even in this minimal implementation, separating "what range to read" from
 //   "actually reading it" is the seed of a query planner. Phase 6 will expand
@@ -23,54 +40,77 @@ import (
 	"github.com/yahya/db-engine/catalog"
 	"github.com/yahya/db-engine/pager"
 	"github.com/yahya/db-engine/query"
+	"github.com/yahya/db-engine/storage"
+	"github.com/yahya/db-engine/wal"
 )
 
-// intColSize and textColSize are the fixed on-disk byte widths for each column type.
-//
-// Why fixed widths?
-//   Variable-length encoding (like PostgreSQL's varlena) is more space-efficient
-//   but requires offset arrays and makes random access O(n) within a row.
-//   For Phase 3, fixed widths keep encoding dead simple: column offset = sum of
-//   prior column widths. Phase 6 can introduce overflow pages for long strings.
-//
-// Why TEXT = 48 bytes?
-//   With INT = 8 bytes and btree.ValueSize = 64, the table [id INT, name TEXT, age INT]
-//   uses 8 + 48 + 8 = 64 bytes — exactly fills one B+ Tree value slot.
-//   This is a deliberate constraint, not a bug. It teaches how storage engines
-//   must balance record size against page capacity.
 const (
 	intColSize  = 8  // bytes per INT column
-	textColSize = 48 // bytes per TEXT column; max 47 printable chars + room for a null
+	textColSize = 48 // bytes per TEXT column; max 47 printable chars + null
 )
 
 // DB is an open database backed by a directory.
 // Each table has its own B+ Tree file (<dir>/<table>.db).
 // The schema for all tables is in <dir>/catalog.
+// The WAL is in <dir>/wal.
 type DB struct {
-	dir     string
-	catalog *catalog.Catalog
+	dir      string
+	catalog  *catalog.Catalog
+	wal      *wal.WAL
+	activeTx *activeTx // non-nil when an explicit BEGIN is in progress
+}
+
+// activeTx holds the state of an explicit transaction across multiple statements.
+type activeTx struct {
+	xid    uint32
+	pagers map[string]*pager.TxPager // lowercase table name → TxPager
+	bases  map[string]*pager.Pager   // lowercase table name → underlying Pager (kept open)
 }
 
 // Result is returned by Exec for every statement.
 // For SELECT, Columns and Rows are populated.
-// For CREATE TABLE and INSERT, only Message is set.
+// For other statements, only Message is set.
 type Result struct {
 	Columns []string          // column headers
 	Rows    [][]catalog.Value // decoded row values
 	Message string
 }
 
-// Open opens (or creates) a database at dir.
+// Open opens (or creates) a database at dir and runs WAL crash recovery.
 func Open(dir string) (*DB, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("create database directory %q: %w", dir, err)
 	}
+
+	w, err := wal.Open(filepath.Join(dir, "wal"))
+	if err != nil {
+		return nil, fmt.Errorf("open WAL: %w", err)
+	}
+	// Redo any committed writes that did not reach the data files before a crash.
+	if err := w.Recover(dir); err != nil {
+		_ = w.Close()
+		return nil, fmt.Errorf("WAL recovery: %w", err)
+	}
+
 	cat, err := catalog.Load(filepath.Join(dir, "catalog"))
 	if err != nil {
+		_ = w.Close()
 		return nil, fmt.Errorf("load catalog: %w", err)
 	}
-	return &DB{dir: dir, catalog: cat}, nil
+	return &DB{dir: dir, catalog: cat, wal: w}, nil
 }
+
+// Close rolls back any open transaction, syncs the WAL, and releases file handles.
+func (db *DB) Close() error {
+	if db.activeTx != nil {
+		_ = db.rollbackTx(db.activeTx)
+		db.activeTx = nil
+	}
+	return db.wal.Close()
+}
+
+// InTransaction reports whether an explicit BEGIN is in progress.
+func (db *DB) InTransaction() bool { return db.activeTx != nil }
 
 // Exec parses and executes a SQL statement.
 func (db *DB) Exec(sql string) (*Result, error) {
@@ -85,35 +125,142 @@ func (db *DB) Exec(sql string) (*Result, error) {
 		return db.execInsert(s)
 	case *query.SelectStmt:
 		return db.execSelect(s)
+	case *query.BeginStmt:
+		return db.execBegin()
+	case *query.CommitStmt:
+		return db.execCommit()
+	case *query.RollbackStmt:
+		return db.execRollback()
 	default:
 		return nil, fmt.Errorf("unsupported statement type %T", stmt)
 	}
 }
 
+// --- transaction control ---
+
+func (db *DB) execBegin() (*Result, error) {
+	if db.activeTx != nil {
+		return nil, fmt.Errorf("transaction already in progress; COMMIT or ROLLBACK first")
+	}
+	xid, err := db.wal.AllocXID()
+	if err != nil {
+		return nil, fmt.Errorf("begin: %w", err)
+	}
+	db.activeTx = &activeTx{
+		xid:    xid,
+		pagers: make(map[string]*pager.TxPager),
+		bases:  make(map[string]*pager.Pager),
+	}
+	return &Result{Message: "BEGIN"}, nil
+}
+
+func (db *DB) execCommit() (*Result, error) {
+	if db.activeTx == nil {
+		return nil, fmt.Errorf("no active transaction")
+	}
+	tx := db.activeTx
+	db.activeTx = nil
+	if err := db.commitTx(tx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	return &Result{Message: "COMMIT"}, nil
+}
+
+func (db *DB) execRollback() (*Result, error) {
+	if db.activeTx == nil {
+		return nil, fmt.Errorf("no active transaction")
+	}
+	tx := db.activeTx
+	db.activeTx = nil
+	return &Result{Message: "ROLLBACK"}, db.rollbackTx(tx)
+}
+
+// commitTx logs all dirty pages to the WAL, fsyncs, flushes them to disk, then logs COMMIT.
+func (db *DB) commitTx(tx *activeTx) error {
+	// Log write records for every dirty page in every table.
+	for tableName, txpg := range tx.pagers {
+		fileName := tableName + ".db"
+		for _, page := range txpg.DirtyPages() {
+			raw, err := storage.Encode(page)
+			if err != nil {
+				return err
+			}
+			if err := db.wal.AppendWrite(tx.xid, fileName, page.Header.PageID, raw); err != nil {
+				return err
+			}
+		}
+	}
+	// Commit record + fsync: this is the durability point.
+	// After Sync() returns, the transaction survives any subsequent crash.
+	if err := db.wal.AppendCommit(tx.xid); err != nil {
+		return err
+	}
+	if err := db.wal.Sync(); err != nil {
+		return err
+	}
+	// Flush dirty pages to the data files (force policy).
+	for _, txpg := range tx.pagers {
+		if err := txpg.Flush(); err != nil {
+			return err
+		}
+	}
+	for _, pg := range tx.bases {
+		if err := pg.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (db *DB) rollbackTx(tx *activeTx) error {
+	for _, txpg := range tx.pagers {
+		_ = txpg.Rollback()
+	}
+	for _, pg := range tx.bases {
+		_ = pg.Close()
+	}
+	return db.wal.AppendRollback(tx.xid)
+}
+
+// txPagerForTable returns the TxPager for the given table in the active transaction,
+// creating one (and opening the base Pager) on first access.
+func (db *DB) txPagerForTable(tableName string) (*pager.TxPager, error) {
+	key := strings.ToLower(tableName)
+	if txpg, ok := db.activeTx.pagers[key]; ok {
+		return txpg, nil
+	}
+	pg, err := pager.Open(db.tablePath(tableName))
+	if err != nil {
+		return nil, fmt.Errorf("open table file for tx: %w", err)
+	}
+	txpg := pager.NewTxPager(pg)
+	db.activeTx.pagers[key] = txpg
+	db.activeTx.bases[key] = pg
+	return txpg, nil
+}
+
 // --- CREATE TABLE ---
 
+// execCreate is DDL: always auto-commits outside any explicit transaction.
+// We do not WAL-protect the btree file creation — if it fails mid-way the user
+// can retry. The catalog is written after the btree file is ready to avoid a
+// phantom table with no backing file.
 func (db *DB) execCreate(s *query.CreateTableStmt) (*Result, error) {
 	tbl := &catalog.Table{Name: s.TableName, Columns: s.Columns}
-
 	if err := validateSchema(tbl); err != nil {
 		return nil, err
 	}
-
-	// Create the B+ Tree file for this table.
 	pg, err := pager.Open(db.tablePath(s.TableName))
 	if err != nil {
 		return nil, fmt.Errorf("create table file: %w", err)
 	}
 	if _, err := btree.Create(pg); err != nil {
-		pg.Close()
+		_ = pg.Close()
 		return nil, fmt.Errorf("init B+ Tree for %q: %w", s.TableName, err)
 	}
 	if err := pg.Close(); err != nil {
 		return nil, err
 	}
-
-	// Add to catalog after the file is ready. If we did it before, a crash
-	// between catalog.Save and file creation would leave a phantom table.
 	if err := db.catalog.CreateTable(tbl); err != nil {
 		return nil, err
 	}
@@ -137,27 +284,73 @@ func (db *DB) execInsert(s *query.InsertStmt) (*Result, error) {
 				tbl.Columns[i].Name, tbl.Columns[i].Type, v.Type)
 		}
 	}
-
 	pkIdx := tbl.PrimaryKeyIndex()
 	if pkIdx < 0 {
 		return nil, fmt.Errorf("table %q has no primary key column", tbl.Name)
 	}
 	key := s.Values[pkIdx].IntVal
-
 	encoded := encodeRow(tbl, s.Values)
 
-	pg, err := pager.Open(db.tablePath(s.TableName))
+	if db.activeTx != nil {
+		// Inside explicit transaction: buffer writes via TxPager.
+		txpg, err := db.txPagerForTable(s.TableName)
+		if err != nil {
+			return nil, err
+		}
+		bt, err := btree.Open(txpg, 1)
+		if err != nil {
+			return nil, fmt.Errorf("open B+ Tree: %w", err)
+		}
+		if err := bt.Insert(key, encoded); err != nil {
+			return nil, fmt.Errorf("insert: %w", err)
+		}
+		return &Result{Message: "1 row inserted"}, nil
+	}
+
+	// Auto-commit: wrap the single INSERT in a full WAL transaction.
+	return db.autoCommitInsert(s.TableName, key, encoded)
+}
+
+// autoCommitInsert wraps a single INSERT in a WAL transaction:
+//   AllocXID → insert into TxPager → log writes → log commit → fsync → flush pages
+func (db *DB) autoCommitInsert(tableName string, key uint64, encoded [btree.ValueSize]byte) (*Result, error) {
+	xid, err := db.wal.AllocXID()
 	if err != nil {
+		return nil, err
+	}
+
+	pg, err := pager.Open(db.tablePath(tableName))
+	if err != nil {
+		_ = db.wal.AppendRollback(xid)
 		return nil, fmt.Errorf("open table file: %w", err)
 	}
-	defer pg.Close()
 
-	bt, err := btree.Open(pg, 1)
+	txpg := pager.NewTxPager(pg)
+	bt, err := btree.Open(txpg, 1)
 	if err != nil {
+		_ = txpg.Rollback()
+		_ = pg.Close()
+		_ = db.wal.AppendRollback(xid)
 		return nil, fmt.Errorf("open B+ Tree: %w", err)
 	}
+
 	if err := bt.Insert(key, encoded); err != nil {
+		_ = txpg.Rollback()
+		_ = pg.Close()
+		_ = db.wal.AppendRollback(xid)
 		return nil, fmt.Errorf("insert: %w", err)
+	}
+
+	// Commit: log dirty pages → log commit → fsync → flush.
+	singleTx := &activeTx{
+		xid:    xid,
+		pagers: map[string]*pager.TxPager{strings.ToLower(tableName): txpg},
+		bases:  map[string]*pager.Pager{strings.ToLower(tableName): pg},
+	}
+	if err := db.commitTx(singleTx); err != nil {
+		// commitTx closes bases; rollback the TxPager dirty buffer.
+		_ = txpg.Rollback()
+		return nil, err
 	}
 	return &Result{Message: "1 row inserted"}, nil
 }
@@ -170,25 +363,22 @@ func (db *DB) execSelect(s *query.SelectStmt) (*Result, error) {
 		return nil, fmt.Errorf("table %q does not exist", s.TableName)
 	}
 
-	// Determine which columns to return.
 	outCols, colIdxs, err := resolveColumns(tbl, s.Columns)
 	if err != nil {
 		return nil, err
 	}
 
-	// Plan the key range from WHERE conditions on the primary key.
-	// This is the "index push-down": instead of scanning all rows and filtering,
-	// we compute the tightest B+ Tree range that satisfies the PK conditions.
-	// Non-PK conditions become post-filters applied after the scan.
 	minKey, maxKey := planKeyRange(tbl, s.Where)
 
-	pg, err := pager.Open(db.tablePath(s.TableName))
+	// Choose a PageStore: TxPager (reads own uncommitted writes) inside a tx,
+	// or a freshly opened base Pager outside one.
+	ps, closePS, err := db.getReadStore(s.TableName)
 	if err != nil {
-		return nil, fmt.Errorf("open table file: %w", err)
+		return nil, err
 	}
-	defer pg.Close()
+	defer closePS()
 
-	bt, err := btree.Open(pg, 1)
+	bt, err := btree.Open(ps, 1)
 	if err != nil {
 		return nil, fmt.Errorf("open B+ Tree: %w", err)
 	}
@@ -201,13 +391,9 @@ func (db *DB) execSelect(s *query.SelectStmt) (*Result, error) {
 	res := &Result{Columns: outCols}
 	for _, e := range entries {
 		row := decodeRow(tbl, e.Value)
-
-		// Post-filter: apply WHERE conditions on non-PK columns (or repeated PK checks).
 		if s.Where != nil && !rowMatchesWhere(row, tbl, s.Where) {
 			continue
 		}
-
-		// Project: pick only the requested columns.
 		projected := make([]catalog.Value, len(colIdxs))
 		for i, idx := range colIdxs {
 			projected[i] = row[idx]
@@ -215,6 +401,24 @@ func (db *DB) execSelect(s *query.SelectStmt) (*Result, error) {
 		res.Rows = append(res.Rows, projected)
 	}
 	return res, nil
+}
+
+// getReadStore returns a PageStore appropriate for a read operation.
+// Inside an explicit transaction, returns the TxPager (for read-your-own-writes).
+// Outside a transaction, opens and returns a fresh base Pager.
+func (db *DB) getReadStore(tableName string) (pager.PageStore, func(), error) {
+	if db.activeTx != nil {
+		txpg, err := db.txPagerForTable(tableName)
+		if err != nil {
+			return nil, nil, err
+		}
+		return txpg, func() {}, nil
+	}
+	pg, err := pager.Open(db.tablePath(tableName))
+	if err != nil {
+		return nil, nil, fmt.Errorf("open table file: %w", err)
+	}
+	return pg, func() { _ = pg.Close() }, nil
 }
 
 // planKeyRange computes the tightest (minKey, maxKey) range implied by the
@@ -266,13 +470,11 @@ func planKeyRange(tbl *catalog.Table, where *query.WhereClause) (minKey, maxKey 
 }
 
 // rowMatchesWhere tests whether a decoded row satisfies all WHERE conditions.
-// Called after the index scan to filter rows that passed the key range but fail
-// non-PK conditions (e.g. WHERE name = 'Alice').
 func rowMatchesWhere(row []catalog.Value, tbl *catalog.Table, where *query.WhereClause) bool {
 	for _, cond := range where.Conds {
 		idx := tbl.ColIndex(cond.Column)
 		if idx < 0 {
-			continue // unknown column — ignore (error could be raised earlier)
+			continue
 		}
 		if !matchCondition(row[idx], cond) {
 			return false
@@ -318,7 +520,6 @@ func matchCondition(v catalog.Value, cond query.Condition) bool {
 }
 
 // resolveColumns maps SELECT column list to schema indices.
-// Returns (output column names, column indices in schema row).
 func resolveColumns(tbl *catalog.Table, cols []string) ([]string, []int, error) {
 	if len(cols) == 1 && cols[0] == "*" {
 		names := make([]string, len(tbl.Columns))
@@ -344,10 +545,6 @@ func resolveColumns(tbl *catalog.Table, cols []string) ([]string, []int, error) 
 
 // --- row encoding / decoding ---
 
-// encodeRow packs a row's values into a fixed [btree.ValueSize]byte.
-// Column layout is deterministic: INT = intColSize bytes, TEXT = textColSize bytes,
-// in schema column order. Redundantly storing the PK in the value is a
-// deliberate simplicity choice: decoding never needs the B+ Tree key separately.
 func encodeRow(tbl *catalog.Table, values []catalog.Value) [btree.ValueSize]byte {
 	var buf [btree.ValueSize]byte
 	off := 0
@@ -357,7 +554,6 @@ func encodeRow(tbl *catalog.Table, values []catalog.Value) [btree.ValueSize]byte
 			binary.LittleEndian.PutUint64(buf[off:off+intColSize], values[i].IntVal)
 			off += intColSize
 		case catalog.TypeText:
-			// copy truncates automatically if TextVal is longer than textColSize
 			copy(buf[off:off+textColSize], values[i].TextVal)
 			off += textColSize
 		}
@@ -365,7 +561,6 @@ func encodeRow(tbl *catalog.Table, values []catalog.Value) [btree.ValueSize]byte
 	return buf
 }
 
-// decodeRow unpacks a [btree.ValueSize]byte into a slice of Values using the schema.
 func decodeRow(tbl *catalog.Table, buf [btree.ValueSize]byte) []catalog.Value {
 	row := make([]catalog.Value, len(tbl.Columns))
 	off := 0
@@ -379,7 +574,6 @@ func decodeRow(tbl *catalog.Table, buf [btree.ValueSize]byte) []catalog.Value {
 			off += intColSize
 		case catalog.TypeText:
 			raw := buf[off : off+textColSize]
-			// Trim trailing zero bytes — TEXT is stored null-padded.
 			end := textColSize
 			for end > 0 && raw[end-1] == 0 {
 				end--
@@ -391,7 +585,6 @@ func decodeRow(tbl *catalog.Table, buf [btree.ValueSize]byte) []catalog.Value {
 	return row
 }
 
-// validateSchema checks that a table schema is usable in Phase 3.
 func validateSchema(tbl *catalog.Table) error {
 	if tbl.PrimaryKeyIndex() < 0 {
 		return fmt.Errorf("table %q must have at least one INT column (used as primary key)", tbl.Name)
@@ -406,8 +599,8 @@ func validateSchema(tbl *catalog.Table) error {
 		}
 	}
 	if size > btree.ValueSize {
-		return fmt.Errorf("table %q: row size %d bytes exceeds B+ Tree value size %d — "+
-			"use fewer columns or smaller types", tbl.Name, size, btree.ValueSize)
+		return fmt.Errorf("table %q: row size %d bytes exceeds B+ Tree value size %d",
+			tbl.Name, size, btree.ValueSize)
 	}
 	return nil
 }

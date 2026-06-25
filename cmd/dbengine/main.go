@@ -266,12 +266,14 @@ func runBTreeInfo(file string) {
 
 // runSQL opens (or creates) a database directory and starts an interactive REPL.
 // SQL statements are accumulated line by line until a ';' is seen.
+// The prompt shows [db*]> when an explicit BEGIN is in progress.
 // Type 'quit' or '\q' to exit.
 func runSQL(dir string) {
 	db, err := executor.Open(dir)
 	if err != nil {
 		die("open database: %v", err)
 	}
+	defer db.Close()
 
 	dbName := filepath.Base(dir)
 	fmt.Printf("db-engine SQL REPL — database: %s\n", dbName)
@@ -282,18 +284,32 @@ func runSQL(dir string) {
 
 	for {
 		if buf.Len() == 0 {
-			fmt.Printf("[%s]> ", dbName)
+			// Asterisk in prompt signals an open explicit transaction.
+			if db.InTransaction() {
+				fmt.Printf("[%s*]> ", dbName)
+			} else {
+				fmt.Printf("[%s]> ", dbName)
+			}
 		} else {
 			fmt.Printf("  ... > ")
 		}
 
 		if !scanner.Scan() {
-			break // EOF or Ctrl-D
+			// EOF / Ctrl-D: rollback any open transaction before exiting.
+			if db.InTransaction() {
+				fmt.Println("\nwarning: open transaction rolled back on exit")
+				db.Exec("ROLLBACK")
+			}
+			break
 		}
 		line := scanner.Text()
 		trimmed := strings.TrimSpace(line)
 
 		if trimmed == "quit" || trimmed == `\q` {
+			if db.InTransaction() {
+				fmt.Println("warning: open transaction rolled back on exit")
+				db.Exec("ROLLBACK")
+			}
 			fmt.Println("bye.")
 			break
 		}
@@ -486,12 +502,16 @@ Phase 2 — B+ Tree commands (use a separate file):
 Phase 3 — SQL REPL:
   sql  <dir>   open (or create) a database directory and start the REPL
                SQL statements end with ';'; type 'quit' to exit
+               Prompt shows [db*]> when an explicit transaction is open
 
 Example SQL session:
   dbengine sql mydb
   [mydb]> CREATE TABLE users (id INT, name TEXT, age INT);
   [mydb]> INSERT INTO users VALUES (1, 'Alice', 30);
-  [mydb]> SELECT * FROM users WHERE id >= 1;
+  [mydb]> BEGIN;
+  [mydb*]> INSERT INTO users VALUES (2, 'Bob', 25);
+  [mydb*]> ROLLBACK;
+  [mydb]> SELECT * FROM users;
   [mydb]> quit
 `)
 }

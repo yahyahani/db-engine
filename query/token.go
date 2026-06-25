@@ -17,8 +17,11 @@ const (
 	TokInsert
 	TokInto
 	TokValues
-	TokInt  // type keyword INT
-	TokText // type keyword TEXT
+	TokInt      // type keyword INT
+	TokText     // type keyword TEXT
+	TokBegin    // transaction control
+	TokCommit
+	TokRollback
 
 	// Literals
 	TokIdent  // unquoted identifier: table name, column name

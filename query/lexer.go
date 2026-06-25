@@ -11,17 +11,20 @@ import (
 // The lexer converts identifiers to lowercase before checking this map,
 // so SQL keywords are case-insensitive (SELECT = select = Select).
 var keywords = map[string]TokenKind{
-	"select": TokSelect,
-	"from":   TokFrom,
-	"where":  TokWhere,
-	"and":    TokAnd,
-	"create": TokCreate,
-	"table":  TokTable,
-	"insert": TokInsert,
-	"into":   TokInto,
-	"values": TokValues,
-	"int":    TokInt,
-	"text":   TokText,
+	"select":   TokSelect,
+	"from":     TokFrom,
+	"where":    TokWhere,
+	"and":      TokAnd,
+	"create":   TokCreate,
+	"table":    TokTable,
+	"insert":   TokInsert,
+	"into":     TokInto,
+	"values":   TokValues,
+	"int":      TokInt,
+	"text":     TokText,
+	"begin":    TokBegin,
+	"commit":   TokCommit,
+	"rollback": TokRollback,
 }
 
 // Tokenize converts a SQL string into a flat slice of Tokens.

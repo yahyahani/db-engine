@@ -56,6 +56,18 @@ type SelectStmt struct {
 	Where     *WhereClause
 }
 
+// BeginStmt represents BEGIN — start an explicit transaction.
+type BeginStmt struct{}
+
+// CommitStmt represents COMMIT — durably persist an explicit transaction.
+type CommitStmt struct{}
+
+// RollbackStmt represents ROLLBACK — discard an explicit transaction.
+type RollbackStmt struct{}
+
 func (*CreateTableStmt) stmtNode() {}
 func (*InsertStmt) stmtNode()      {}
 func (*SelectStmt) stmtNode()      {}
+func (*BeginStmt) stmtNode()       {}
+func (*CommitStmt) stmtNode()      {}
+func (*RollbackStmt) stmtNode()    {}

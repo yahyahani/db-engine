@@ -19,7 +19,10 @@ func tempDB(t *testing.T) (*DB, func()) {
 		os.RemoveAll(dir)
 		t.Fatal(err)
 	}
-	return db, func() { os.RemoveAll(dir) }
+	return db, func() {
+		db.Close()
+		os.RemoveAll(dir)
+	}
 }
 
 func mustExec(t *testing.T, db *DB, sql string) *Result {
@@ -66,7 +69,6 @@ func TestCreateTableRowTooBig(t *testing.T) {
 	db, cleanup := tempDB(t)
 	defer cleanup()
 
-	// 2 TEXT columns = 48+48 = 96 bytes > 64
 	if _, err := db.Exec("CREATE TABLE fat (id INT, a TEXT, b TEXT)"); err == nil {
 		t.Error("expected error: row exceeds btree.ValueSize")
 	}
@@ -199,7 +201,96 @@ func TestSelectUnknownColumn(t *testing.T) {
 	}
 }
 
-// --- persistence ---
+// --- explicit transactions ---
+
+func TestExplicitTransactionCommit(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+
+	mustExec(t, db, "CREATE TABLE t (id INT, val TEXT)")
+	mustExec(t, db, "BEGIN")
+	mustExec(t, db, "INSERT INTO t VALUES (1, 'alpha')")
+	mustExec(t, db, "INSERT INTO t VALUES (2, 'beta')")
+	mustExec(t, db, "COMMIT")
+
+	res := mustExec(t, db, "SELECT * FROM t")
+	if len(res.Rows) != 2 {
+		t.Fatalf("expected 2 rows after COMMIT, got %d", len(res.Rows))
+	}
+}
+
+func TestExplicitTransactionRollback(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+
+	mustExec(t, db, "CREATE TABLE t (id INT, val TEXT)")
+	mustExec(t, db, "INSERT INTO t VALUES (1, 'before')")
+
+	mustExec(t, db, "BEGIN")
+	mustExec(t, db, "INSERT INTO t VALUES (2, 'rolled back')")
+	mustExec(t, db, "ROLLBACK")
+
+	res := mustExec(t, db, "SELECT * FROM t")
+	if len(res.Rows) != 1 {
+		t.Fatalf("expected 1 row after ROLLBACK, got %d", len(res.Rows))
+	}
+	if res.Rows[0][0].IntVal != 1 {
+		t.Errorf("expected row 1 to survive, got %v", res.Rows[0])
+	}
+}
+
+func TestReadYourOwnWrites(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+
+	mustExec(t, db, "CREATE TABLE t (id INT, val TEXT)")
+	mustExec(t, db, "BEGIN")
+	mustExec(t, db, "INSERT INTO t VALUES (42, 'uncommitted')")
+
+	// SELECT inside the same transaction must see the uncommitted row.
+	res := mustExec(t, db, "SELECT * FROM t WHERE id = 42")
+	if len(res.Rows) != 1 {
+		t.Fatalf("read-your-own-writes failed: expected 1 row, got %d", len(res.Rows))
+	}
+	mustExec(t, db, "ROLLBACK")
+
+	// After rollback the row must be gone.
+	res = mustExec(t, db, "SELECT * FROM t")
+	if len(res.Rows) != 0 {
+		t.Errorf("expected 0 rows after rollback, got %d", len(res.Rows))
+	}
+}
+
+func TestBeginWhileInTransaction(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+
+	mustExec(t, db, "BEGIN")
+	if _, err := db.Exec("BEGIN"); err == nil {
+		t.Error("expected error for nested BEGIN")
+	}
+	mustExec(t, db, "ROLLBACK")
+}
+
+func TestCommitWithoutBegin(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+
+	if _, err := db.Exec("COMMIT"); err == nil {
+		t.Error("expected error for COMMIT without BEGIN")
+	}
+}
+
+func TestRollbackWithoutBegin(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+
+	if _, err := db.Exec("ROLLBACK"); err == nil {
+		t.Error("expected error for ROLLBACK without BEGIN")
+	}
+}
+
+// --- persistence & WAL recovery ---
 
 func TestPersistenceAcrossReopen(t *testing.T) {
 	dir, err := os.MkdirTemp("", "dbengine-persist-*")
@@ -217,6 +308,9 @@ func TestPersistenceAcrossReopen(t *testing.T) {
 		db.Exec("CREATE TABLE users (id INT, name TEXT, age INT)")
 		db.Exec("INSERT INTO users VALUES (1, 'Alice', 30)")
 		db.Exec("INSERT INTO users VALUES (2, 'Bob', 25)")
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	// Session 2 — reopen and verify
@@ -225,6 +319,7 @@ func TestPersistenceAcrossReopen(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		defer db.Close()
 		res, err := db.Exec("SELECT * FROM users")
 		if err != nil {
 			t.Fatalf("SELECT after reopen: %v", err)
@@ -238,5 +333,44 @@ func TestPersistenceAcrossReopen(t *testing.T) {
 	}
 }
 
-// catalog is used for Value type checks in table comparisons.
-var _ = catalog.TypeInt // keep import used
+func TestWALRecoveryAfterCrash(t *testing.T) {
+	dir, err := os.MkdirTemp("", "dbengine-recovery-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	// Session 1: commit a transaction, then simulate crash by NOT closing db
+	// (dirty pages are flushed by commitTx so recovery would re-apply them).
+	{
+		db, err := Open(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		db.Exec("CREATE TABLE t (id INT, val TEXT)")
+		db.Exec("INSERT INTO t VALUES (7, 'crash-test')")
+		// Simulate crash: don't call db.Close() — leak the file handles.
+		// The WAL Sync() was called by commitTx so the records are durable.
+		_ = db // prevent GC-related issues in the test
+	}
+
+	// Session 2: normal open triggers WAL recovery (re-applies committed writes).
+	{
+		db, err := Open(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+
+		res, err := db.Exec("SELECT * FROM t WHERE id = 7")
+		if err != nil {
+			t.Fatalf("SELECT after recovery: %v", err)
+		}
+		if len(res.Rows) != 1 || res.Rows[0][1].TextVal != "crash-test" {
+			t.Errorf("recovery failed: expected row (7, 'crash-test'), got %v", res.Rows)
+		}
+	}
+}
+
+// keep catalog import used
+var _ = catalog.TypeInt
