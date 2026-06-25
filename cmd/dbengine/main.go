@@ -1,6 +1,4 @@
-// Command dbengine is a small interactive CLI for manually exercising the Phase 1
-// storage engine (raw pages) and the Phase 2 B+ Tree index.
-// It is not part of the engine itself — it's a learning tool.
+// Command dbengine is an interactive CLI for the db-engine learning project.
 //
 // Phase 1 (raw page) commands:
 //
@@ -11,22 +9,30 @@
 //	dbengine read         <file> <id>         print the contents of a page
 //	dbengine free         <file> <id>         free a page for re-use
 //
-// Phase 2 (B+ Tree) commands — use a dedicated btree file:
+// Phase 2 (B+ Tree) commands:
 //
 //	dbengine btree-init   <file>              initialise a new B+ Tree file
 //	dbengine btree-set    <file> <key> <val>  insert or update a key
 //	dbengine btree-get    <file> <key>        point lookup
 //	dbengine btree-scan   <file> <min> <max>  range scan (inclusive)
 //	dbengine btree-info   <file>              print tree metadata
+//
+// Phase 3 (SQL REPL):
+//
+//	dbengine sql          <dir>               open (or create) a database and start the REPL
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/yahya/db-engine/btree"
+	"github.com/yahya/db-engine/catalog"
+	"github.com/yahya/db-engine/executor"
 	"github.com/yahya/db-engine/pager"
 	"github.com/yahya/db-engine/storage"
 )
@@ -41,6 +47,9 @@ func main() {
 	file := os.Args[2]
 
 	switch cmd {
+	// Phase 3: SQL REPL
+	case "sql":
+		runSQL(file)
 	// Phase 1: raw page commands
 	case "init":
 		runInit(file)
@@ -253,6 +262,144 @@ func runBTreeInfo(file string) {
 		pg.TotalPages(), int64(pg.TotalPages())*4)
 }
 
+// --- Phase 3: SQL REPL ---
+
+// runSQL opens (or creates) a database directory and starts an interactive REPL.
+// SQL statements are accumulated line by line until a ';' is seen.
+// Type 'quit' or '\q' to exit.
+func runSQL(dir string) {
+	db, err := executor.Open(dir)
+	if err != nil {
+		die("open database: %v", err)
+	}
+
+	dbName := filepath.Base(dir)
+	fmt.Printf("db-engine SQL REPL — database: %s\n", dbName)
+	fmt.Printf("Type SQL statements (end with ';'), 'quit' to exit.\n\n")
+
+	scanner := bufio.NewScanner(os.Stdin)
+	var buf strings.Builder
+
+	for {
+		if buf.Len() == 0 {
+			fmt.Printf("[%s]> ", dbName)
+		} else {
+			fmt.Printf("  ... > ")
+		}
+
+		if !scanner.Scan() {
+			break // EOF or Ctrl-D
+		}
+		line := scanner.Text()
+		trimmed := strings.TrimSpace(line)
+
+		if trimmed == "quit" || trimmed == `\q` {
+			fmt.Println("bye.")
+			break
+		}
+		if trimmed == "" {
+			continue
+		}
+
+		buf.WriteString(line)
+		buf.WriteByte(' ')
+
+		// Execute once we see a semicolon.
+		if !strings.Contains(line, ";") {
+			continue
+		}
+
+		sql := strings.TrimSpace(buf.String())
+		buf.Reset()
+
+		result, err := db.Exec(sql)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n\n", err)
+			continue
+		}
+		printResult(result)
+	}
+}
+
+// printResult formats a Result for terminal output.
+func printResult(res *executor.Result) {
+	if res.Message != "" {
+		fmt.Println(res.Message)
+		fmt.Println()
+		return
+	}
+
+	if len(res.Rows) == 0 {
+		fmt.Println("(0 rows)")
+		fmt.Println()
+		return
+	}
+
+	// Compute column widths (min = header length).
+	widths := make([]int, len(res.Columns))
+	for i, col := range res.Columns {
+		widths[i] = len(col)
+	}
+	for _, row := range res.Rows {
+		for i, v := range row {
+			if l := len(v.String()); l > widths[i] {
+				widths[i] = l
+			}
+		}
+	}
+
+	// Header row.
+	printRow(res.Columns, widths, false)
+	printDivider(widths)
+
+	// Data rows.
+	for _, row := range res.Rows {
+		strs := make([]string, len(row))
+		for i, v := range row {
+			strs[i] = v.String()
+		}
+		printRow(strs, widths, false)
+	}
+
+	n := len(res.Rows)
+	if n == 1 {
+		fmt.Println("(1 row)")
+	} else {
+		fmt.Printf("(%d rows)\n", n)
+	}
+	fmt.Println()
+}
+
+func printRow(cols []string, widths []int, _ bool) {
+	var sb strings.Builder
+	for i, col := range cols {
+		if i > 0 {
+			sb.WriteString(" | ")
+		}
+		sb.WriteString(col)
+		for j := len(col); j < widths[i]; j++ {
+			sb.WriteByte(' ')
+		}
+	}
+	fmt.Println(sb.String())
+}
+
+func printDivider(widths []int) {
+	var sb strings.Builder
+	for i, w := range widths {
+		if i > 0 {
+			sb.WriteString("-+-")
+		}
+		for j := 0; j < w; j++ {
+			sb.WriteByte('-')
+		}
+	}
+	fmt.Println(sb.String())
+}
+
+// keep catalog import used (Value.String() is called in printResult)
+var _ = catalog.TypeInt
+
 func mustBTreeOpen(pg *pager.Pager) *btree.BTree {
 	bt, err := btree.Open(pg, 1) // header page is always 1 in a dedicated btree file
 	if err != nil {
@@ -319,7 +466,7 @@ func die(format string, args ...any) {
 }
 
 func printUsage() {
-	fmt.Print(`dbengine — storage engine demo (Phase 1 + Phase 2)
+	fmt.Print(`dbengine — storage engine demo (Phase 1 + Phase 2 + Phase 3)
 
 Phase 1 — raw page commands:
   init   <file>                 create a new database file
@@ -336,14 +483,15 @@ Phase 2 — B+ Tree commands (use a separate file):
   btree-scan  <file> <min> <max>      range scan (inclusive)
   btree-info  <file>                  print tree metadata
 
-Example B+ Tree session:
-  dbengine btree-init  index.db
-  dbengine btree-set   index.db 1 "Alice"
-  dbengine btree-set   index.db 2 "Bob"
-  dbengine btree-set   index.db 3 "Charlie"
-  dbengine btree-get   index.db 2
-  dbengine btree-scan  index.db 1 3
-  # restart — data persists
-  dbengine btree-get   index.db 1
+Phase 3 — SQL REPL:
+  sql  <dir>   open (or create) a database directory and start the REPL
+               SQL statements end with ';'; type 'quit' to exit
+
+Example SQL session:
+  dbengine sql mydb
+  [mydb]> CREATE TABLE users (id INT, name TEXT, age INT);
+  [mydb]> INSERT INTO users VALUES (1, 'Alice', 30);
+  [mydb]> SELECT * FROM users WHERE id >= 1;
+  [mydb]> quit
 `)
 }
