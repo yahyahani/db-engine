@@ -74,6 +74,8 @@ func (p *parser) parseStatement() (Statement, error) {
 		return p.parseSelect()
 	case TokExplain:
 		return p.parseExplain()
+	case TokAnalyze:
+		return p.parseAnalyze()
 	case TokBegin:
 		p.consume()
 		return &BeginStmt{}, nil
@@ -86,6 +88,16 @@ func (p *parser) parseStatement() (Statement, error) {
 	default:
 		return nil, fmt.Errorf("expected SELECT, INSERT, CREATE, DROP, EXPLAIN, BEGIN, COMMIT, or ROLLBACK — got %q", p.peek().Text)
 	}
+}
+
+// parseAnalyze parses: ANALYZE tablename
+func (p *parser) parseAnalyze() (*AnalyzeStmt, error) {
+	p.consume() // ANALYZE
+	name, err := p.expect(TokIdent)
+	if err != nil {
+		return nil, fmt.Errorf("ANALYZE: expected table name")
+	}
+	return &AnalyzeStmt{TableName: name.Text}, nil
 }
 
 // parseCreate dispatches between CREATE TABLE and CREATE INDEX.

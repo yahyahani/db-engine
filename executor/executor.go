@@ -47,13 +47,14 @@ import (
 	"github.com/yahya/db-engine/pager"
 	"github.com/yahya/db-engine/planner"
 	"github.com/yahya/db-engine/query"
+	"github.com/yahya/db-engine/stats"
 	"github.com/yahya/db-engine/storage"
 	"github.com/yahya/db-engine/wal"
 )
 
 const (
-	intColSize  = 8  // bytes per INT column
-	textColSize = 48 // bytes per TEXT column; max 47 printable chars + null
+	intColSize  = catalog.IntColSize  // bytes per INT column
+	textColSize = catalog.TextColSize // bytes per TEXT column; max 47 chars + null
 )
 
 // openFile tracks a table or secondary index file that is open for the session.
@@ -69,11 +70,13 @@ type openTable struct {
 // Each secondary index has its own B+ Tree file (<dir>/<indexname>.idx).
 // The schema for all tables and indexes is in <dir>/catalog.
 // The WAL is in <dir>/wal.
+// Table statistics (collected by ANALYZE) are in <dir>/stats.
 // Both table and index pagers stay open for the lifetime of the DB so the
 // buffer pool can serve repeated reads without reopening files.
 type DB struct {
 	dir      string
 	catalog  *catalog.Catalog
+	statsDB  *stats.StatsDB
 	wal      *wal.WAL
 	pool     *bufferpool.Pool
 	openTbls map[string]*openTable // lowercase table name → open table
@@ -118,9 +121,16 @@ func Open(dir string) (*DB, error) {
 		return nil, fmt.Errorf("load catalog: %w", err)
 	}
 
+	sdb, err := stats.LoadStatsDB(filepath.Join(dir, "stats"))
+	if err != nil {
+		_ = w.Close()
+		return nil, fmt.Errorf("load stats: %w", err)
+	}
+
 	return &DB{
 		dir:      dir,
 		catalog:  cat,
+		statsDB:  sdb,
 		wal:      w,
 		pool:     bufferpool.New(bufferpool.DefaultCapacity),
 		openTbls: make(map[string]*openTable),
@@ -166,6 +176,8 @@ func (db *DB) Exec(sql string) (*Result, error) {
 		return db.execCreateIndex(s)
 	case *query.DropIndexStmt:
 		return db.execDropIndex(s)
+	case *query.AnalyzeStmt:
+		return db.execAnalyze(s)
 	case *query.InsertStmt:
 		return db.execInsert(s)
 	case *query.SelectStmt:
@@ -412,6 +424,31 @@ func (db *DB) execDropIndex(s *query.DropIndexStmt) (*Result, error) {
 	return &Result{Message: fmt.Sprintf("index %q dropped", s.IndexName)}, nil
 }
 
+// --- ANALYZE ---
+
+// execAnalyze performs a full table scan to collect statistics and persists
+// them to <dir>/stats.  Subsequent queries can then use cost-based plan
+// selection instead of the rule-based fallback.
+func (db *DB) execAnalyze(s *query.AnalyzeStmt) (*Result, error) {
+	tbl, ok := db.catalog.GetTable(s.TableName)
+	if !ok {
+		return nil, fmt.Errorf("table %q does not exist", s.TableName)
+	}
+	ps, err := db.getOrOpenTable(s.TableName)
+	if err != nil {
+		return nil, err
+	}
+	ts, err := stats.Collect(tbl, ps)
+	if err != nil {
+		return nil, fmt.Errorf("analyze %q: %w", s.TableName, err)
+	}
+	db.statsDB.Set(ts)
+	if err := db.statsDB.Save(); err != nil {
+		return nil, fmt.Errorf("save stats: %w", err)
+	}
+	return &Result{Message: fmt.Sprintf("analyzed %q: %d rows", s.TableName, ts.RowCount)}, nil
+}
+
 // --- INSERT ---
 
 func (db *DB) execInsert(s *query.InsertStmt) (*Result, error) {
@@ -592,7 +629,11 @@ func (db *DB) execSelect(s *query.SelectStmt) (*Result, error) {
 		return nil, fmt.Errorf("table %q does not exist", s.TableName)
 	}
 
-	plan, err := planner.Plan(s, tbl)
+	// Pass stats to the planner so it can make cost-based decisions.
+	// If ANALYZE has not been run yet, ts is nil and the planner falls back
+	// to the Phase 9 rule-based heuristic.
+	ts, _ := db.statsDB.Get(s.TableName)
+	plan, err := planner.Plan(s, tbl, ts)
 	if err != nil {
 		return nil, err
 	}
@@ -617,7 +658,8 @@ func (db *DB) execExplain(s *query.ExplainStmt) (*Result, error) {
 	if !ok {
 		return nil, fmt.Errorf("table %q does not exist", s.Inner.TableName)
 	}
-	plan, err := planner.Plan(s.Inner, tbl)
+	ts, _ := db.statsDB.Get(s.Inner.TableName)
+	plan, err := planner.Plan(s.Inner, tbl, ts)
 	if err != nil {
 		return nil, err
 	}

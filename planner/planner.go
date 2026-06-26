@@ -7,23 +7,26 @@ import (
 
 	"github.com/yahya/db-engine/catalog"
 	"github.com/yahya/db-engine/query"
+	"github.com/yahya/db-engine/stats"
 )
 
 // Plan builds a physical plan for a SELECT statement.
 //
-// Algorithm (rule-based, no cost estimates):
+// Algorithm:
 //
-//  1. For each OR group in the WHERE clause call planGroup, which may emit
-//     an IndexLookup (secondary index) or an IndexScan (primary key).
-//     - If the group contains an equality or range condition on a column that
-//       has a secondary index, emit IndexLookup for that condition and apply
-//       all other conditions of the group as a Filter.
-//     - Otherwise fall back to the PK-range scan + Filter logic.
+//  1. For each OR group in the WHERE clause call planGroup, which may emit an
+//     IndexLookup (secondary index), an IndexScan (primary key), or a Filter
+//     wrapping either.
+//     - When ts is non-nil (stats available from ANALYZE): cost-based — compare
+//       IndexLookupCost vs FullScanCost for each secondary index candidate and
+//       pick the cheapest path.
+//     - When ts is nil (no ANALYZE run yet): rule-based fallback — always prefer
+//       a secondary index when one exists (Phase 9 behaviour).
 //
 //  2. One branch per OR group. Multiple branches are merged by Union.
 //
 //  3. Wrap with [Limit] → Project (always outermost).
-func Plan(s *query.SelectStmt, tbl *catalog.Table) (PhysicalNode, error) {
+func Plan(s *query.SelectStmt, tbl *catalog.Table, ts *stats.TableStats) (PhysicalNode, error) {
 	cols, idxs, err := resolveColumns(tbl, s.Columns)
 	if err != nil {
 		return nil, err
@@ -37,7 +40,7 @@ func Plan(s *query.SelectStmt, tbl *catalog.Table) (PhysicalNode, error) {
 		branches = []PhysicalNode{&IndexScan{Table: tbl, MinKey: 0, MaxKey: math.MaxUint64}}
 	} else {
 		for _, group := range s.Where.Groups {
-			branches = append(branches, planGroup(tbl, group))
+			branches = append(branches, planGroup(tbl, group, ts))
 		}
 	}
 
@@ -60,22 +63,81 @@ func Plan(s *query.SelectStmt, tbl *catalog.Table) (PhysicalNode, error) {
 
 // planGroup builds the physical plan for one AND group of conditions.
 //
-// Secondary index selection rule (Phase 9, rule-based):
-//   Scan the conditions for the first one that (a) references an indexed column
-//   and (b) has an INT literal value.  If found, use IndexLookup for that
-//   condition and apply all remaining conditions as a Filter above it.
+// When ts is non-nil (stats available), delegates to costBasedPlanGroup which
+// compares IndexLookupCost vs FullScanCost for each secondary index candidate
+// and picks the cheaper access path.
 //
-// Why only the first matching index?
-//   Choosing between multiple indexes requires cost estimates (row count,
-//   selectivity).  A cost-based optimizer is Phase 10.  For now we pick the
-//   first index encountered, which is consistent and predictable.
-func planGroup(tbl *catalog.Table, conds []query.Condition) PhysicalNode {
+// When ts is nil (no ANALYZE run yet), falls back to ruleBasedPlanGroup which
+// always prefers a secondary index when one exists (Phase 9 behaviour).
+func planGroup(tbl *catalog.Table, conds []query.Condition, ts *stats.TableStats) PhysicalNode {
+	if ts != nil {
+		return costBasedPlanGroup(tbl, conds, ts)
+	}
+	return ruleBasedPlanGroup(tbl, conds)
+}
+
+// costBasedPlanGroup picks the cheapest access path using statistics.
+//
+// For each condition that covers a secondary index, it estimates:
+//   - matchingRows  = selectivity × RowCount
+//   - indexLookupCost = matchingRows × 2 × log₂(RowCount)  (double-lookup)
+//   - fullScanCost    = ceil(RowCount / 56)                  (leaf pages)
+//
+// The index with the lowest cost wins.  If no index beats the full scan, the
+// planner falls back to classifyGroup (PK range scan + Filter).
+func costBasedPlanGroup(tbl *catalog.Table, conds []query.Condition, ts *stats.TableStats) PhysicalNode {
+	fsCost := stats.FullScanCost(ts.RowCount)
+	bestCost := fsCost
+	bestIdx := -1
+
 	for i, cond := range conds {
 		def := tbl.IndexForColumn(cond.Column)
 		if def == nil || cond.Val.Type != catalog.TypeInt {
 			continue
 		}
-		// Found a secondary index condition — compute its key bounds.
+		cs := ts.ColStat(cond.Column)
+		sel := stats.EstimateSelectivity(cond, cs)
+		matchingRows := uint64(sel * float64(ts.RowCount))
+		if matchingRows == 0 {
+			matchingRows = 1
+		}
+		ilCost := stats.IndexLookupCost(matchingRows, ts.RowCount)
+		if ilCost < bestCost {
+			bestCost = ilCost
+			bestIdx = i
+		}
+	}
+
+	if bestIdx >= 0 {
+		cond := conds[bestIdx]
+		def := tbl.IndexForColumn(cond.Column)
+		min, max := condToRange(cond)
+		rest := withoutIdx(conds, bestIdx)
+		var branch PhysicalNode = &IndexLookup{Table: tbl, Index: def, MinKey: min, MaxKey: max}
+		if len(rest) > 0 {
+			branch = &Filter{Child: branch, Preds: rest}
+		}
+		return branch
+	}
+
+	// No index is cost-effective — fall back to PK range scan + Filter.
+	minKey, maxKey, post := classifyGroup(tbl, conds)
+	var branch PhysicalNode = &IndexScan{Table: tbl, MinKey: minKey, MaxKey: maxKey}
+	if len(post) > 0 {
+		branch = &Filter{Child: branch, Preds: post}
+	}
+	return branch
+}
+
+// ruleBasedPlanGroup is the Phase 9 rule-based fallback used when no stats are
+// available.  It picks the first condition that has a secondary index, without
+// any cost comparison.
+func ruleBasedPlanGroup(tbl *catalog.Table, conds []query.Condition) PhysicalNode {
+	for i, cond := range conds {
+		def := tbl.IndexForColumn(cond.Column)
+		if def == nil || cond.Val.Type != catalog.TypeInt {
+			continue
+		}
 		min, max := condToRange(cond)
 		rest := withoutIdx(conds, i)
 		var branch PhysicalNode = &IndexLookup{Table: tbl, Index: def, MinKey: min, MaxKey: max}

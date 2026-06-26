@@ -28,6 +28,7 @@ const (
 	TokIndex   // INDEX
 	TokOn      // ON
 	TokDrop    // DROP
+	TokAnalyze // ANALYZE
 
 	// Literals
 	TokIdent  // unquoted identifier: table name, column name

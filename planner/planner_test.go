@@ -7,6 +7,7 @@ import (
 
 	"github.com/yahya/db-engine/catalog"
 	"github.com/yahya/db-engine/query"
+	"github.com/yahya/db-engine/stats"
 )
 
 // makeTable builds a simple schema: id INT, name TEXT, age INT.
@@ -24,7 +25,16 @@ func makeTable() *catalog.Table {
 
 func mustPlan(t *testing.T, s *query.SelectStmt, tbl *catalog.Table) PhysicalNode {
 	t.Helper()
-	plan, err := Plan(s, tbl)
+	plan, err := Plan(s, tbl, nil) // nil → rule-based (Phase 9 behaviour)
+	if err != nil {
+		t.Fatalf("Plan() error: %v", err)
+	}
+	return plan
+}
+
+func mustPlanWithStats(t *testing.T, s *query.SelectStmt, tbl *catalog.Table, ts *stats.TableStats) PhysicalNode {
+	t.Helper()
+	plan, err := Plan(s, tbl, ts)
 	if err != nil {
 		t.Fatalf("Plan() error: %v", err)
 	}
@@ -232,7 +242,7 @@ func TestPlanColumnProjection(t *testing.T) {
 func TestPlanUnknownColumnError(t *testing.T) {
 	tbl := makeTable()
 	s := &query.SelectStmt{TableName: "users", Columns: []string{"missing"}}
-	_, err := Plan(s, tbl)
+	_, err := Plan(s, tbl, nil)
 	if err == nil {
 		t.Fatal("expected error for unknown column, got nil")
 	}
@@ -518,5 +528,142 @@ func TestExplainIndexLookup(t *testing.T) {
 	}
 	if !strings.Contains(out, "point lookup") {
 		t.Errorf("expected 'point lookup' in explain output, got:\n%s", out)
+	}
+}
+
+// --- Phase 10: cost-based optimizer tests ---
+
+// makeStatsForTable constructs a TableStats object for test use.
+func makeStatsForTable(tbl *catalog.Table, rowCount uint64, colStats []stats.ColumnStat) *stats.TableStats {
+	return &stats.TableStats{
+		Table:    tbl.Name,
+		RowCount: rowCount,
+		Columns:  colStats,
+	}
+}
+
+// TestCBOSelectsIndexForHighlySelectiveQuery verifies that with a large table
+// and a highly selective condition, the CBO chooses IndexLookup over full scan.
+//
+// Setup: 10 000 rows, NDistinct(age)=10 000 → selectivity = 1/10000 = 0.0001
+//   matchingRows  = 1
+//   indexLookupCost ≈ 1 × 2 × log₂(10001) ≈ 28   (cheap: only 1 row)
+//   fullScanCost    ≈ ceil(10000/56) ≈ 179          (must read whole table)
+//   → CBO should pick IndexLookup
+func TestCBOSelectsIndexForHighlySelectiveQuery(t *testing.T) {
+	tbl := makeIndexedTable()
+	ts := makeStatsForTable(tbl, 10_000, []stats.ColumnStat{
+		{Name: "id", NDistinct: 10_000, Min: 1, Max: 10_000},
+		{Name: "name", NDistinct: 5_000},
+		{Name: "age", NDistinct: 10_000, Min: 1, Max: 10_000},
+	})
+	s := &query.SelectStmt{
+		TableName: "users",
+		Columns:   []string{"*"},
+		Where: andWhere(
+			query.Condition{Column: "age", Op: query.OpEq, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 42}},
+		),
+	}
+	proj := rootProject(t, mustPlanWithStats(t, s, tbl, ts))
+	if _, ok := proj.Child.(*IndexLookup); !ok {
+		t.Fatalf("CBO should pick IndexLookup for highly selective query; got %T", proj.Child)
+	}
+}
+
+// TestCBOChoosesFullScanForLowSelectivity verifies that when nearly all rows
+// match the condition, the CBO prefers a full scan over IndexLookup.
+//
+// Setup: 10 000 rows, NDistinct(age)=2 → selectivity = 0.5
+//   matchingRows  = 5 000
+//   indexLookupCost ≈ 5000 × 2 × log₂(10001) ≈ 140 000   (very expensive)
+//   fullScanCost    ≈ ceil(10000/56) ≈ 179                  (cheap)
+//   → CBO should pick full scan (IndexScan + Filter)
+func TestCBOChoosesFullScanForLowSelectivity(t *testing.T) {
+	tbl := makeIndexedTable()
+	ts := makeStatsForTable(tbl, 10_000, []stats.ColumnStat{
+		{Name: "id", NDistinct: 10_000, Min: 1, Max: 10_000},
+		{Name: "name", NDistinct: 2},
+		{Name: "age", NDistinct: 2, Min: 0, Max: 1}, // binary column — half the table matches
+	})
+	s := &query.SelectStmt{
+		TableName: "users",
+		Columns:   []string{"*"},
+		Where: andWhere(
+			query.Condition{Column: "age", Op: query.OpEq, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 1}},
+		),
+	}
+	proj := rootProject(t, mustPlanWithStats(t, s, tbl, ts))
+	// Should NOT use IndexLookup — expect Filter(IndexScan) or plain IndexScan.
+	switch proj.Child.(type) {
+	case *IndexScan, *Filter:
+		// correct — full scan path
+	default:
+		t.Fatalf("CBO should use full scan for low-selectivity query; got %T", proj.Child)
+	}
+}
+
+// TestCBONilStatsFallsBackToRuleBased verifies that with nil stats the planner
+// behaves like Phase 9: always use a secondary index when available.
+func TestCBONilStatsFallsBackToRuleBased(t *testing.T) {
+	tbl := makeIndexedTable()
+	s := &query.SelectStmt{
+		TableName: "users",
+		Columns:   []string{"*"},
+		Where: andWhere(
+			query.Condition{Column: "age", Op: query.OpEq, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 42}},
+		),
+	}
+	proj := rootProject(t, mustPlanWithStats(t, s, tbl, nil))
+	if _, ok := proj.Child.(*IndexLookup); !ok {
+		t.Fatalf("nil stats should use rule-based (IndexLookup); got %T", proj.Child)
+	}
+}
+
+// TestCBOPicksBestIndexAmongMultipleCandidates verifies that when two
+// conditions both have secondary indexes, the CBO picks the more selective one.
+func TestCBOPicksBestIndexAmongMultipleCandidates(t *testing.T) {
+	// Table with two indexed INT columns: score (low NDistinct) and rank (high NDistinct).
+	tbl := &catalog.Table{
+		Name: "players",
+		Columns: []catalog.ColumnDef{
+			{Name: "id", Type: catalog.TypeInt},
+			{Name: "score", Type: catalog.TypeInt},
+			{Name: "rank", Type: catalog.TypeInt},
+		},
+		Indexes: []catalog.IndexDef{
+			{Name: "idx_score", Table: "players", Column: "score"},
+			{Name: "idx_rank", Table: "players", Column: "rank"},
+		},
+	}
+	ts := &stats.TableStats{
+		Table:    "players",
+		RowCount: 100_000,
+		Columns: []stats.ColumnStat{
+			{Name: "id", NDistinct: 100_000, Min: 1, Max: 100_000},
+			{Name: "score", NDistinct: 10, Min: 1, Max: 10},   // 10% selectivity — expensive
+			{Name: "rank", NDistinct: 100_000, Min: 1, Max: 100_000}, // 0.001% — cheap
+		},
+	}
+	s := &query.SelectStmt{
+		TableName: "players",
+		Columns:   []string{"*"},
+		Where: andWhere(
+			query.Condition{Column: "score", Op: query.OpEq, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 5}},
+			query.Condition{Column: "rank", Op: query.OpEq, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 99999}},
+		),
+	}
+	proj := rootProject(t, mustPlanWithStats(t, s, tbl, ts))
+	// The CBO must choose the rank index (more selective), not the score index.
+	// The plan is Filter(IndexLookup) — score condition becomes a Filter.
+	f, ok := proj.Child.(*Filter)
+	if !ok {
+		t.Fatalf("expected Filter(IndexLookup), got %T", proj.Child)
+	}
+	il, ok := f.Child.(*IndexLookup)
+	if !ok {
+		t.Fatalf("expected IndexLookup below Filter, got %T", f.Child)
+	}
+	if il.Index.Name != "idx_rank" {
+		t.Errorf("CBO should pick idx_rank (more selective), got %q", il.Index.Name)
 	}
 }

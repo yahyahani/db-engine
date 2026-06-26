@@ -16,6 +16,13 @@ import (
 	"strings"
 )
 
+// Row encoding sizes.  Every column occupies a fixed number of bytes inside the
+// 64-byte B-Tree value slot so the executor and stats packages agree on layout.
+const (
+	IntColSize  = 8  // bytes per INT column
+	TextColSize = 48 // bytes per TEXT column; 47 usable chars + null terminator
+)
+
 // catalogMagicV2 is the magic number for the current catalog format.
 // Bumped from V1 (0xCA7A1060) when secondary index definitions were added.
 // Open() rejects old catalogs with a clear error rather than silently
@@ -252,6 +259,30 @@ func (c *Catalog) DropIndex(indexName string) error {
 func (c *Catalog) GetIndex(name string) (*IndexDef, bool) {
 	def, ok := c.indexes[strings.ToLower(name)]
 	return def, ok
+}
+
+// Decode decodes a raw B-Tree value slot ([]byte) into column values according
+// to the table's schema.  Used by the stats collector and the executor.
+// buf must contain at least the total encoded row size.
+func (t *Table) Decode(buf []byte) []Value {
+	row := make([]Value, len(t.Columns))
+	off := 0
+	for i, col := range t.Columns {
+		switch col.Type {
+		case TypeInt:
+			row[i] = Value{Type: TypeInt, IntVal: binary.LittleEndian.Uint64(buf[off : off+IntColSize])}
+			off += IntColSize
+		case TypeText:
+			raw := buf[off : off+TextColSize]
+			end := TextColSize
+			for end > 0 && raw[end-1] == 0 {
+				end--
+			}
+			row[i] = Value{Type: TypeText, TextVal: string(raw[:end])}
+			off += TextColSize
+		}
+	}
+	return row
 }
 
 // --- binary serialization ---

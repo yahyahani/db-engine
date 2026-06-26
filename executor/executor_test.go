@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/yahya/db-engine/catalog"
+	"github.com/yahya/db-engine/stats"
 )
 
 func tempDB(t *testing.T) (*DB, func()) {
@@ -775,5 +776,190 @@ func TestExplainIndexLookup(t *testing.T) {
 	}
 	if !contains(res.Message, "idx_users_age") {
 		t.Errorf("expected index name in EXPLAIN output, got:\n%s", res.Message)
+	}
+}
+
+// --- Phase 10: ANALYZE and cost-based optimizer tests ---
+
+// TestAnalyzeBasic verifies that ANALYZE runs without error and returns the row count.
+func TestAnalyzeBasic(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+
+	mustExec(t, db, "CREATE TABLE scores (id INT, score INT)")
+	for i := 1; i <= 5; i++ {
+		mustExec(t, db, fmt.Sprintf("INSERT INTO scores VALUES (%d, %d)", i, i*10))
+	}
+
+	res := mustExec(t, db, "ANALYZE scores")
+	if !contains(res.Message, "5 rows") {
+		t.Errorf("ANALYZE message should mention row count, got: %q", res.Message)
+	}
+}
+
+// TestAnalyzeNonexistentTable verifies that ANALYZE fails for an unknown table.
+func TestAnalyzeNonexistentTable(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+
+	if _, err := db.Exec("ANALYZE ghost"); err == nil {
+		t.Error("expected error for ANALYZE on nonexistent table")
+	}
+}
+
+// TestAnalyzeEmptyTable verifies that ANALYZE on an empty table records 0 rows.
+func TestAnalyzeEmptyTable(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+
+	mustExec(t, db, "CREATE TABLE empty (id INT)")
+	res := mustExec(t, db, "ANALYZE empty")
+	if !contains(res.Message, "0 rows") {
+		t.Errorf("ANALYZE empty table should report 0 rows, got: %q", res.Message)
+	}
+}
+
+// TestAnalyzePersistsAcrossReopen verifies that stats are saved to disk and
+// available after reopening the database.
+func TestAnalyzePersistsAcrossReopen(t *testing.T) {
+	dir, err := os.MkdirTemp("", "dbengine-stats-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	{
+		db, _ := Open(dir)
+		db.Exec("CREATE TABLE t (id INT, val INT)")
+		for i := 1; i <= 20; i++ {
+			db.Exec(fmt.Sprintf("INSERT INTO t VALUES (%d, %d)", i, i))
+		}
+		db.Exec("ANALYZE t")
+		db.Close()
+	}
+
+	{
+		db, err := Open(dir)
+		if err != nil {
+			t.Fatalf("reopen: %v", err)
+		}
+		defer db.Close()
+
+		ts, ok := db.statsDB.Get("t")
+		if !ok {
+			t.Fatal("stats not found after reopen")
+		}
+		if ts.RowCount != 20 {
+			t.Errorf("RowCount after reopen: got %d, want 20", ts.RowCount)
+		}
+	}
+}
+
+// TestCBOUsesIndexForSelectiveQueryWithLargeStats verifies that the CBO picks
+// IndexLookup when stats indicate a large table and a highly selective condition.
+//
+// The test inserts a small table but injects synthetic stats simulating 10 000
+// rows with 10 000 distinct ages.  With these numbers:
+//   matchingRows  = 1
+//   indexLookupCost ≈ 3 × log₂(10001) ≈ 40  (cheap: only 1 double-lookup)
+//   fullScanCost    ≈ ceil(10000/56) ≈ 179    (must read whole "large" table)
+// → CBO picks IndexLookup.
+func TestCBOUsesIndexForSelectiveQueryWithLargeStats(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+
+	mustExec(t, db, "CREATE TABLE big (id INT, age INT)")
+	mustExec(t, db, "CREATE INDEX idx_age ON big (age)")
+	mustExec(t, db, "INSERT INTO big VALUES (42, 42)")
+
+	// Inject stats that simulate a 10 000-row table.
+	db.statsDB.Set(&stats.TableStats{
+		Table:    "big",
+		RowCount: 10_000,
+		Columns: []stats.ColumnStat{
+			{Name: "id", NDistinct: 10_000, Min: 1, Max: 10_000},
+			{Name: "age", NDistinct: 10_000, Min: 1, Max: 10_000},
+		},
+	})
+
+	res := mustExec(t, db, "EXPLAIN SELECT * FROM big WHERE age = 42")
+	if !contains(res.Message, "IndexLookup") {
+		t.Errorf("CBO should choose IndexLookup for highly selective query; got:\n%s", res.Message)
+	}
+}
+
+// TestCBOChoosesFullScanForRangeCoveringAllRows verifies that a range condition
+// matching every row causes the CBO to prefer a full scan over IndexLookup.
+//
+// The test injects stats with 10 000 rows, then queries WHERE age >= 1 which
+// covers the entire [1, 10000] range → selectivity ≈ 1.0 → 10 000 matching rows
+//   indexLookupCost ≈ 10000 × 2 × log₂(10001) ≈ 269 000  (one lookup per row)
+//   fullScanCost    ≈ 179 leaf pages
+// → CBO picks full scan.
+func TestCBOChoosesFullScanForRangeCoveringAllRows(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+
+	mustExec(t, db, "CREATE TABLE wide (id INT, age INT)")
+	mustExec(t, db, "CREATE INDEX idx_age ON wide (age)")
+	mustExec(t, db, "INSERT INTO wide VALUES (1, 1)")
+
+	db.statsDB.Set(&stats.TableStats{
+		Table:    "wide",
+		RowCount: 10_000,
+		Columns: []stats.ColumnStat{
+			{Name: "id", NDistinct: 10_000, Min: 1, Max: 10_000},
+			{Name: "age", NDistinct: 10_000, Min: 1, Max: 10_000},
+		},
+	})
+
+	res := mustExec(t, db, "EXPLAIN SELECT * FROM wide WHERE age >= 1")
+	if contains(res.Message, "IndexLookup") {
+		t.Errorf("CBO should avoid IndexLookup when range covers all rows; got:\n%s", res.Message)
+	}
+}
+
+// TestCBOWithoutAnalyzeFallsBackToRuleBased verifies that before ANALYZE is run,
+// the planner always uses a secondary index when one exists (Phase 9 behaviour).
+func TestCBOWithoutAnalyzeFallsBackToRuleBased(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+
+	mustExec(t, db, "CREATE TABLE t (id INT, val INT)")
+	mustExec(t, db, "CREATE INDEX idx_val ON t (val)")
+	mustExec(t, db, "INSERT INTO t VALUES (1, 100)")
+
+	// No ANALYZE — should use rule-based (always prefer index).
+	res := mustExec(t, db, "EXPLAIN SELECT * FROM t WHERE val = 100")
+	if !contains(res.Message, "IndexLookup") {
+		t.Errorf("without ANALYZE, rule-based planner should use IndexLookup, got:\n%s", res.Message)
+	}
+}
+
+// TestAnalyzeResultsAreUsedInSelect verifies end-to-end that a query on an
+// indexed column returns correct results both before and after ANALYZE.
+func TestAnalyzeResultsAreUsedInSelect(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+
+	mustExec(t, db, "CREATE TABLE items (id INT, score INT)")
+	mustExec(t, db, "CREATE INDEX idx_score ON items (score)")
+
+	for i := 1; i <= 100; i++ {
+		mustExec(t, db, fmt.Sprintf("INSERT INTO items VALUES (%d, %d)", i, i))
+	}
+
+	// Before ANALYZE — rule-based (uses index)
+	res := mustExec(t, db, "SELECT id FROM items WHERE score = 42")
+	if len(res.Rows) != 1 || res.Rows[0][0].IntVal != 42 {
+		t.Fatalf("before ANALYZE: expected row id=42, got %v", res.Rows)
+	}
+
+	mustExec(t, db, "ANALYZE items")
+
+	// After ANALYZE — cost-based (should still use index for point lookup)
+	res = mustExec(t, db, "SELECT id FROM items WHERE score = 42")
+	if len(res.Rows) != 1 || res.Rows[0][0].IntVal != 42 {
+		t.Fatalf("after ANALYZE: expected row id=42, got %v", res.Rows)
 	}
 }

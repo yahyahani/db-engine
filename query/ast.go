@@ -90,6 +90,15 @@ type DropIndexStmt struct {
 	IndexName string
 }
 
+// AnalyzeStmt represents: ANALYZE tablename
+//
+// Triggers a full table scan to collect per-column statistics (row count,
+// distinct values, min/max for INT columns).  Results are persisted to
+// <dir>/stats and used by the planner on subsequent queries.
+type AnalyzeStmt struct {
+	TableName string
+}
+
 // BeginStmt represents BEGIN — start an explicit transaction.
 type BeginStmt struct{}
 
@@ -105,6 +114,7 @@ func (*DropIndexStmt) stmtNode()   {}
 func (*InsertStmt) stmtNode()      {}
 func (*SelectStmt) stmtNode()      {}
 func (*ExplainStmt) stmtNode()     {}
+func (*AnalyzeStmt) stmtNode()     {}
 func (*BeginStmt) stmtNode()       {}
 func (*CommitStmt) stmtNode()      {}
 func (*RollbackStmt) stmtNode()    {}
