@@ -12,20 +12,10 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/sql/sql.min.js"></script>
 <style>
-/* ── Accent gradient (constant in both modes) ───────────────────────────── */
+/* ── Shared constants ────────────────────────────────────────────────────── */
 :root {
   --grad:       linear-gradient(135deg, #fb7185 0%, #fb923c 100%);
   --grad-shine: linear-gradient(135deg, rgba(255,255,255,.18) 0%, rgba(255,255,255,0) 55%);
-  /* Sidebar is always dark — light-mode values (warm dark, not cold black) */
-  --sb-bg:            #1a1416;
-  --sb-bg-grad:       linear-gradient(180deg, #201719 0%, #160f11 100%);
-  --sb-text-1:        #f4f4f5;
-  --sb-text-2:        #a1a1aa;
-  --sb-text-3:        #52525b;
-  --sb-border:        rgba(255,255,255,.07);
-  --sb-item-hover:    rgba(255,255,255,.06);
-  --sb-item-active:   rgba(251,113,133,.14);
-  --sb-active-border: rgba(251,113,133,.28);
 }
 
 /* ── Light theme ─────────────────────────────────────────────────────────── */
@@ -106,16 +96,6 @@ html[data-theme="dark"] {
   --cm-num:        #fb923c;
   --cm-cmt:        #57534e;
   --cm-op:         #78716c;
-  /* Sidebar darker in dark mode */
-  --sb-bg:            #170f12;
-  --sb-bg-grad:       linear-gradient(180deg, #1c1216 0%, #120a0d 100%);
-  --sb-text-1:        #f5f5f4;
-  --sb-text-2:        #a8a29e;
-  --sb-text-3:        #57534e;
-  --sb-border:        rgba(255,255,255,.06);
-  --sb-item-hover:    rgba(255,255,255,.05);
-  --sb-item-active:   rgba(251,113,133,.12);
-  --sb-active-border: rgba(251,113,133,.22);
 }
 
 /* (light theme is now defined above in the :root / light block) */
@@ -132,15 +112,25 @@ body {
   transition: background .35s ease, color .25s ease;
 }
 
-/* ── Background — subtle accent blobs ───────────────────────────────────── */
+/* ── Background — visible accent blobs ──────────────────────────────────── */
 .bg-layer {
   position: fixed; inset: 0; z-index: 0;
   pointer-events: none;
-  background:
-    radial-gradient(ellipse 55% 40% at 92% 8%,  rgba(251,113,133,.07) 0%, transparent 70%),
-    radial-gradient(ellipse 45% 35% at 6%  88%, rgba(251,146,60,.06)  0%, transparent 65%),
-    var(--bg);
   transition: background .35s ease;
+}
+html[data-theme="light"] .bg-layer {
+  background:
+    radial-gradient(ellipse 60% 50% at 95% 5%,  rgba(251,113,133,.12) 0%, transparent 65%),
+    radial-gradient(ellipse 50% 40% at 5%  92%, rgba(251,146,60,.10)  0%, transparent 60%),
+    radial-gradient(ellipse 40% 35% at 52% 88%, rgba(253,186,116,.07) 0%, transparent 55%),
+    var(--bg);
+}
+html[data-theme="dark"] .bg-layer {
+  background:
+    radial-gradient(ellipse 55% 45% at 95% 5%,  rgba(251,113,133,.16) 0%, transparent 60%),
+    radial-gradient(ellipse 45% 38% at 4%  92%, rgba(251,146,60,.13)  0%, transparent 55%),
+    radial-gradient(ellipse 38% 32% at 52% 86%, rgba(251,113,133,.08) 0%, transparent 50%),
+    var(--bg);
 }
 #bg-svg { display: none; }
 
@@ -255,44 +245,39 @@ html[data-theme="light"] .toggle-thumb { left: 3px; }
   padding: 0 10px 10px;
 }
 
-/* ── Sidebar — always dark with warm gradient ────────────────────────────── */
+/* ── Sidebar — consistent with other panels ──────────────────────────────── */
 .sidebar {
   display: flex; flex-direction: column;
   border-radius: 22px; overflow: hidden;
-  background: var(--sb-bg-grad) !important;
-  border: 1px solid var(--sb-border) !important;
-  box-shadow: 0 4px 24px rgba(0,0,0,.22), inset 0 1px 0 rgba(255,255,255,.05) !important;
-  transition: background .35s, box-shadow .35s;
+  /* inherits .glass (card-bg + card-shadow) */
+  /* right border for visual column separation */
+  border-right: 1px solid var(--divider) !important;
 }
 
 .sidebar-head {
   display: flex; align-items: center; justify-content: space-between;
   padding: 12px 14px 9px; flex-shrink: 0;
-  border-bottom: 1px solid var(--sb-border);
+  border-bottom: 1px solid var(--divider);
 }
 
 .section-label {
   font-size: 10px; font-weight: 700;
   letter-spacing: .1em; text-transform: uppercase;
-  color: var(--sb-text-3);
-}
-/* section-label in main content (panel bars) */
-.main .section-label, .panel-label {
   color: var(--text-3);
 }
 
 .icon-btn {
   width: 24px; height: 24px; border: none;
-  background: transparent; color: var(--sb-text-3);
-  border-radius: 999px; cursor: pointer; font-size: 14px;
+  background: transparent; color: var(--text-3);
+  border-radius: 8px; cursor: pointer; font-size: 14px;
   display: flex; align-items: center; justify-content: center;
   transition: color .15s, background .15s;
 }
-.icon-btn:hover { color: var(--sb-text-1); background: var(--sb-item-hover); }
+.icon-btn:hover { color: var(--accent); background: var(--accent-dim); }
 
 .tbl-list { flex: 1; overflow-y: auto; padding: 6px 8px 12px; }
 .tbl-list::-webkit-scrollbar { width: 3px; }
-.tbl-list::-webkit-scrollbar-thumb { background: var(--sb-border); border-radius: 2px; }
+.tbl-list::-webkit-scrollbar-thumb { background: var(--divider); border-radius: 2px; }
 
 /* Table item */
 .tbl-item {
@@ -300,28 +285,28 @@ html[data-theme="light"] .toggle-thumb { left: 3px; }
   overflow: hidden; border: 1px solid transparent;
   transition: background .12s, border-color .12s;
 }
-.tbl-item:hover { background: var(--sb-item-hover); }
+.tbl-item:hover { background: var(--item-hover); }
 .tbl-item.active {
-  background: var(--sb-item-active);
-  border-color: var(--sb-active-border);
+  background: rgba(251,113,133,.1);
+  border-color: rgba(251,113,133,.2);
 }
 .tbl-row { display: flex; align-items: center; gap: 8px; padding: 7px 10px; }
 
 .tbl-icon-svg {
-  width: 14px; height: 14px; color: var(--sb-text-3);
+  width: 14px; height: 14px; color: var(--text-3);
   flex-shrink: 0; transition: color .15s;
 }
-.tbl-item.active .tbl-icon-svg { color: #fb7185; }
+.tbl-item.active .tbl-icon-svg { color: var(--accent); }
 
 .tbl-name {
   font-size: 12.5px; font-weight: 500; flex: 1;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  color: var(--sb-text-2); transition: color .15s;
+  color: var(--text-2); transition: color .15s;
 }
-.tbl-item.active .tbl-name { color: var(--sb-text-1); }
+.tbl-item.active .tbl-name { color: var(--text-1); font-weight: 600; }
 
 .tbl-rows {
-  font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--sb-text-3);
+  font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-3);
 }
 
 /* Details panel */
@@ -333,45 +318,47 @@ html[data-theme="light"] .toggle-thumb { left: 3px; }
 .detail-group { margin-top: 8px; }
 .detail-head {
   font-size: 9.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
-  color: var(--sb-text-3); margin-bottom: 4px;
+  color: var(--text-3); margin-bottom: 4px;
 }
 .col-row, .idx-row, .stat-row {
   display: flex; align-items: center; justify-content: space-between; padding: 2px 0;
 }
 .col-n, .idx-n {
-  font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--sb-text-2);
+  font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-2);
 }
 .type-badge {
   font-size: 9.5px; font-weight: 600; font-family: 'JetBrains Mono', monospace;
   padding: 1px 8px; border-radius: 999px;
 }
-.type-badge.INT  { color: #67e8f9; background: rgba(103,232,249,.12); }
-.type-badge.TEXT { color: #4ade80; background: rgba(74,222,128,.12); }
+html[data-theme="light"] .type-badge.INT  { color: #0891b2; background: rgba(8,145,178,.1); }
+html[data-theme="light"] .type-badge.TEXT { color: #16a34a; background: rgba(22,163,74,.1); }
+html[data-theme="dark"]  .type-badge.INT  { color: #67e8f9; background: rgba(103,232,249,.1); }
+html[data-theme="dark"]  .type-badge.TEXT { color: #4ade80; background: rgba(74,222,128,.1); }
 .idx-col {
-  font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: #c084fc;
+  font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: var(--violet);
 }
-.stat-k { font-size: 10.5px; color: var(--sb-text-3); }
-.stat-v { font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: var(--sb-text-2); }
+.stat-k { font-size: 10.5px; color: var(--text-3); }
+.stat-v { font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: var(--text-2); }
 .pk-icon { margin-left: 3px; font-size: 10px; vertical-align: middle; }
 .col-idx-badge {
   font-size: 9px; font-weight: 600; font-family: 'JetBrains Mono', monospace;
   padding: 0 6px; border-radius: 999px; margin-left: 3px; vertical-align: middle;
-  color: #c084fc; background: rgba(192,132,252,.12); border: 1px solid rgba(192,132,252,.22);
+  color: var(--violet); background: var(--secondary-dim); border: 1px solid rgba(168,85,247,.2);
 }
 .analyze-hint {
   width: 100%; margin-top: 5px; padding: 5px 10px; border-radius: 8px;
   border: 1px dashed rgba(251,191,36,.35); background: rgba(251,191,36,.06);
-  color: #fbbf24; font-size: 11px; cursor: pointer; text-align: center;
+  color: var(--amber); font-size: 11px; cursor: pointer; text-align: center;
   transition: background .15s, border-color .15s;
   font-family: 'Plus Jakarta Sans', 'Inter', sans-serif;
 }
 .analyze-hint:hover { background: rgba(251,191,36,.12); border-color: rgba(251,191,36,.55); }
 .sidebar-empty {
   padding: 24px 14px; text-align: center;
-  color: var(--sb-text-3); font-size: 12px; line-height: 1.7;
+  color: var(--text-3); font-size: 12px; line-height: 1.7;
 }
 .sidebar-empty code {
-  font-family: 'JetBrains Mono', monospace; color: #fb7185; font-size: 11px;
+  font-family: 'JetBrains Mono', monospace; color: var(--accent); font-size: 11px;
 }
 
 /* ── Main area ───────────────────────────────────────────────────────────── */
@@ -808,7 +795,7 @@ kbd {
       </div>
       <div class="tbl-list" id="tbl-list">
         <div class="empty-state" style="min-height:80px">
-          <svg class="empty-icon" width="28" height="28" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" color="var(--sb-text-3)">
+          <svg class="empty-icon" width="28" height="28" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" style="color:var(--text-3)">
             <path d="M12 2v3H9"/><path d="M2 12V9H5"/>
             <path d="M12 5A5 5 0 0 0 3.5 3.5"/><path d="M2 9a5 5 0 0 0 8.5 1.5"/>
           </svg>
