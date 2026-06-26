@@ -31,7 +31,7 @@ The result is a working database that can execute multi-table SQL queries, survi
 |---|---|---|
 | 💾 | **Storage engine** | Fixed 4 KiB pages, CRC32 checksums, free-page recycling |
 | 🌳 | **B+ Tree indexing** | Ordered key/value store, cursor-based range scans, lazy leaf traversal |
-| 📝 | **SQL parser** | `SELECT`, `INSERT`, `DELETE`, `UPDATE`, `CREATE TABLE`, `WHERE`, `ORDER BY`, `LIMIT`, `JOIN` |
+| 📝 | **SQL parser** | `SELECT`, `INSERT`, `DELETE`, `UPDATE`, `CREATE TABLE`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`, `JOIN` |
 | 🔒 | **WAL & crash recovery** | Write-ahead log, no-steal/force policy, REDO-only recovery |
 | ♻️ | **Buffer pool** | Shared LRU page cache, pool hit/miss statistics |
 | 📊 | **Cost-based optimizer** | Column statistics, cardinality estimates, index vs. full-scan selection |
@@ -41,6 +41,7 @@ The result is a working database that can execute multi-table SQL queries, survi
 | 🌐 | **Web dashboard** | Live SQL editor, schema browser, buffer pool stats, query history |
 | 🔌 | **TCP server** | Length-prefixed JSON wire protocol, concurrent connections, graceful shutdown |
 | ✏️ | **DELETE & UPDATE** | MVCC-aware row deletion and update, secondary index maintenance, two-phase scan |
+| 📈 | **Aggregates** | `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `GROUP BY`, `HAVING`, `ORDER BY` with LIMIT |
 
 ---
 
@@ -90,7 +91,7 @@ db-engine/
 ├── planner/        Physical plan generation, cost estimation, EXPLAIN
 ├── stats/          Per-column cardinality statistics for the cost model
 ├── mvcc/           TxManager, Snapshot, xmin/xmax visibility rules
-├── executor/       SQL dispatch, MVCC transactions, scan/index operators, DELETE/UPDATE (dml.go)
+├── executor/       SQL dispatch, MVCC transactions, scan/index operators, DELETE/UPDATE, aggregates (agg.go)
 ├── server/         TCP server, wire protocol (length-prefixed JSON frames)
 ├── client/         TCP client library (Dial, Exec, Close)
 └── cmd/

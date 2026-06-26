@@ -38,6 +38,17 @@ var keywords = map[string]TokenKind{
 	"delete":   TokDelete,
 	"update":   TokUpdate,
 	"set":      TokSet,
+	"order":    TokOrder,
+	"by":       TokBy,
+	"asc":      TokAsc,
+	"desc":     TokDesc,
+	"group":    TokGroup,
+	"having":   TokHaving,
+	"count":    TokCount,
+	"sum":      TokSum,
+	"avg":      TokAvg,
+	"min":      TokMin,
+	"max":      TokMax,
 }
 
 // Tokenize converts a SQL string into a flat slice of Tokens.

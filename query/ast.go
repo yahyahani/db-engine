@@ -1,6 +1,65 @@
 package query
 
-import "github.com/yahya/db-engine/catalog"
+import (
+	"strings"
+
+	"github.com/yahya/db-engine/catalog"
+)
+
+// ── Aggregate expressions ─────────────────────────────────────────────────────
+
+// AggFunc identifies which aggregate function is applied.
+type AggFunc int
+
+const (
+	AggCount AggFunc = iota // COUNT(col) or COUNT(*)
+	AggSum                  // SUM(col)
+	AggAvg                  // AVG(col)
+	AggMin                  // MIN(col)
+	AggMax                  // MAX(col)
+)
+
+func (f AggFunc) String() string {
+	return [...]string{"COUNT", "SUM", "AVG", "MIN", "MAX"}[f]
+}
+
+// AggCall is an aggregate function call: Func(Col).
+type AggCall struct {
+	Func AggFunc
+	Col  string // column name, or "*" for COUNT(*)
+}
+
+// SelectExpr is one item in a SELECT column list.
+// Exactly one of Col or Agg is set.
+type SelectExpr struct {
+	Col   string   // column reference (bare or qualified) when Agg == nil
+	Agg   *AggCall // aggregate call when non-nil
+	Alias string   // AS alias (optional)
+}
+
+// OutputName returns the name used in the result column header.
+func (e SelectExpr) OutputName() string {
+	if e.Alias != "" {
+		return e.Alias
+	}
+	if e.Agg != nil {
+		col := e.Agg.Col
+		if col == "*" {
+			return "COUNT(*)"
+		}
+		return e.Agg.Func.String() + "(" + col + ")"
+	}
+	if dot := strings.LastIndexByte(e.Col, '.'); dot >= 0 {
+		return e.Col[dot+1:]
+	}
+	return e.Col
+}
+
+// OrderByExpr is one term in an ORDER BY clause.
+type OrderByExpr struct {
+	Col  string
+	Desc bool
+}
 
 // CompareOp is a comparison operator that appears in a WHERE condition.
 type CompareOp int
@@ -83,18 +142,21 @@ type InsertStmt struct {
 	Values    []catalog.Value
 }
 
-// SelectStmt represents: SELECT cols FROM table [JOIN ...] [WHERE ...] [LIMIT n]
+// SelectStmt represents a SELECT statement.
 //
-// From contains at least one TableRef.
-// Joins holds explicit JOIN clauses; implicit cross-joins use From with multiple entries.
-// Columns is ["*"] for SELECT *, or a list of (possibly qualified) column names.
-// Where is nil if there is no WHERE clause.
+// Columns holds the SELECT column list (plain refs and/or aggregate calls).
+// GroupBy lists columns to group by; non-empty implies an aggregate query.
+// Having is a filter applied after grouping (nil = no HAVING).
+// OrderBy specifies sort columns; applied after all other processing.
 // Limit is 0 (no limit) or a positive row count.
 type SelectStmt struct {
-	Columns []string
+	Columns []SelectExpr
 	From    []TableRef
 	Joins   []JoinClause
 	Where   *WhereClause
+	GroupBy []string
+	Having  *WhereClause
+	OrderBy []OrderByExpr
 	Limit   int
 }
 

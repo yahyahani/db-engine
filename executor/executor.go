@@ -742,11 +742,26 @@ func (db *DB) execSelectWithSnap(s *query.SelectStmt, snap mvcc.Snapshot) (*Resu
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
-	tables, statsMap, err := db.collectTablesForSelect(s)
+	// Aggregate queries (any agg function or GROUP BY) use a separate path that
+	// materialises all rows, groups them, and computes aggregate values.
+	if selectHasAgg(s) {
+		return db.execAggSelect(s, snap)
+	}
+
+	// When ORDER BY is present, the planner must not apply LIMIT early —
+	// we need all rows before sorting, then apply LIMIT ourselves.
+	planStmt := s
+	if len(s.OrderBy) > 0 && s.Limit > 0 {
+		tmp := *s
+		tmp.Limit = 0
+		planStmt = &tmp
+	}
+
+	tables, statsMap, err := db.collectTablesForSelect(planStmt)
 	if err != nil {
 		return nil, err
 	}
-	plan, err := planner.Plan(s, tables, statsMap)
+	plan, err := planner.Plan(planStmt, tables, statsMap)
 	if err != nil {
 		return nil, err
 	}
@@ -755,7 +770,19 @@ func (db *DB) execSelectWithSnap(s *query.SelectStmt, snap mvcc.Snapshot) (*Resu
 		return nil, err
 	}
 	proj := plan.(*planner.Project)
-	return &Result{Columns: proj.Columns, Rows: rows}, nil
+	colNames := proj.Columns
+
+	// ORDER BY: sort, then apply LIMIT.
+	if len(s.OrderBy) > 0 {
+		rows, err = applyOrderBy(rows, colNames, s.OrderBy)
+		if err != nil {
+			return nil, err
+		}
+		if s.Limit > 0 && len(rows) > s.Limit {
+			rows = rows[:s.Limit]
+		}
+	}
+	return &Result{Columns: colNames, Rows: rows}, nil
 }
 
 func (db *DB) execExplain(s *query.ExplainStmt) (*Result, error) {

@@ -90,7 +90,7 @@ func (p *parser) parseStatement() (Statement, error) {
 		p.consume()
 		return &RollbackStmt{}, nil
 	default:
-		return nil, fmt.Errorf("expected SELECT, INSERT, CREATE, DROP, EXPLAIN, DELETE, UPDATE, BEGIN, COMMIT, or ROLLBACK — got %q", p.peek().Text)
+		return nil, fmt.Errorf("expected SELECT, INSERT, CREATE, DROP, EXPLAIN, DELETE, UPDATE, ANALYZE, BEGIN, COMMIT, or ROLLBACK — got %q", p.peek().Text)
 	}
 }
 
@@ -238,28 +238,31 @@ func (p *parser) parseInsert() (*InsertStmt, error) {
 	return &InsertStmt{TableName: name.Text, Values: vals}, nil
 }
 
-// parseSelect parses: SELECT cols FROM table [, table ...] [JOIN table ON cond ...] [WHERE ...] [LIMIT n]
+// parseSelect parses:
+//
+//	SELECT exprs FROM table [JOIN ...] [WHERE ...] [GROUP BY ...] [HAVING ...]
+//	       [ORDER BY ...] [LIMIT n]
 func (p *parser) parseSelect() (*SelectStmt, error) {
 	p.consume() // SELECT
 
 	// Parse SELECT column list.
-	var cols []string
+	var exprs []SelectExpr
 	if p.peek().Kind == TokStar {
 		p.consume()
-		cols = []string{"*"}
+		exprs = []SelectExpr{{Col: "*"}}
 	} else {
-		col, err := p.parseColRef()
+		e, err := p.parseSelectExpr()
 		if err != nil {
-			return nil, fmt.Errorf("SELECT: expected column name or *")
+			return nil, fmt.Errorf("SELECT: %w", err)
 		}
-		cols = append(cols, col)
+		exprs = append(exprs, e)
 		for p.peek().Kind == TokComma {
 			p.consume()
-			col, err := p.parseColRef()
+			e, err := p.parseSelectExpr()
 			if err != nil {
-				return nil, fmt.Errorf("SELECT: expected column name after ','")
+				return nil, fmt.Errorf("SELECT: %w", err)
 			}
-			cols = append(cols, col)
+			exprs = append(exprs, e)
 		}
 	}
 
@@ -267,13 +270,12 @@ func (p *parser) parseSelect() (*SelectStmt, error) {
 		return nil, fmt.Errorf("SELECT: expected FROM")
 	}
 
-	// Parse FROM clause: one or more table refs, then optional explicit JOINs.
 	from, joins, err := p.parseFromClause()
 	if err != nil {
 		return nil, err
 	}
 
-	stmt := &SelectStmt{Columns: cols, From: from, Joins: joins}
+	stmt := &SelectStmt{Columns: exprs, From: from, Joins: joins}
 
 	if p.peek().Kind == TokWhere {
 		p.consume()
@@ -283,6 +285,56 @@ func (p *parser) parseSelect() (*SelectStmt, error) {
 		}
 		stmt.Where = where
 	}
+
+	if p.peek().Kind == TokGroup {
+		p.consume() // GROUP
+		if _, err := p.expect(TokBy); err != nil {
+			return nil, fmt.Errorf("GROUP: expected BY")
+		}
+		col, err := p.expect(TokIdent)
+		if err != nil {
+			return nil, fmt.Errorf("GROUP BY: expected column name")
+		}
+		stmt.GroupBy = []string{col.Text}
+		for p.peek().Kind == TokComma {
+			p.consume()
+			col, err = p.expect(TokIdent)
+			if err != nil {
+				return nil, fmt.Errorf("GROUP BY: expected column name after ','")
+			}
+			stmt.GroupBy = append(stmt.GroupBy, col.Text)
+		}
+	}
+
+	if p.peek().Kind == TokHaving {
+		p.consume()
+		having, err := p.parseWhere()
+		if err != nil {
+			return nil, fmt.Errorf("HAVING: %w", err)
+		}
+		stmt.Having = having
+	}
+
+	if p.peek().Kind == TokOrder {
+		p.consume() // ORDER
+		if _, err := p.expect(TokBy); err != nil {
+			return nil, fmt.Errorf("ORDER: expected BY")
+		}
+		ob, err := p.parseOrderByExpr()
+		if err != nil {
+			return nil, err
+		}
+		stmt.OrderBy = []OrderByExpr{ob}
+		for p.peek().Kind == TokComma {
+			p.consume()
+			ob, err = p.parseOrderByExpr()
+			if err != nil {
+				return nil, err
+			}
+			stmt.OrderBy = append(stmt.OrderBy, ob)
+		}
+	}
+
 	if p.peek().Kind == TokLimit {
 		p.consume()
 		n, err := p.expect(TokIntLit)
@@ -297,9 +349,106 @@ func (p *parser) parseSelect() (*SelectStmt, error) {
 	return stmt, nil
 }
 
+// parseSelectExpr parses one SELECT expression: col, agg(*), agg(col), or any
+// of the above followed by AS alias.
+func (p *parser) parseSelectExpr() (SelectExpr, error) {
+	var e SelectExpr
+
+	switch p.peek().Kind {
+	case TokCount, TokSum, TokAvg, TokMin, TokMax:
+		fn := p.consume()
+		agg, err := p.parseAggCall(fn)
+		if err != nil {
+			return SelectExpr{}, err
+		}
+		e.Agg = agg
+	default:
+		col, err := p.parseColRef()
+		if err != nil {
+			return SelectExpr{}, fmt.Errorf("expected column or aggregate function")
+		}
+		e.Col = col
+	}
+
+	if p.peek().Kind == TokAs {
+		p.consume()
+		alias, err := p.parseIdent()
+		if err != nil {
+			return SelectExpr{}, fmt.Errorf("AS: expected alias name")
+		}
+		e.Alias = alias.Text
+	}
+	return e, nil
+}
+
+// parseAggCall parses (col) or (*) after the function keyword token fn.
+func (p *parser) parseAggCall(fn Token) (*AggCall, error) {
+	var f AggFunc
+	switch fn.Kind {
+	case TokCount:
+		f = AggCount
+	case TokSum:
+		f = AggSum
+	case TokAvg:
+		f = AggAvg
+	case TokMin:
+		f = AggMin
+	case TokMax:
+		f = AggMax
+	}
+	if _, err := p.expect(TokLParen); err != nil {
+		return nil, fmt.Errorf("%s: expected '('", fn.Text)
+	}
+	var col string
+	if p.peek().Kind == TokStar {
+		p.consume()
+		col = "*"
+	} else {
+		c, err := p.expect(TokIdent)
+		if err != nil {
+			return nil, fmt.Errorf("%s: expected column name or *", fn.Text)
+		}
+		col = c.Text
+	}
+	if _, err := p.expect(TokRParen); err != nil {
+		return nil, fmt.Errorf("%s: expected ')'", fn.Text)
+	}
+	return &AggCall{Func: f, Col: col}, nil
+}
+
+// parseOrderByExpr parses one ORDER BY term: col [ASC|DESC].
+func (p *parser) parseOrderByExpr() (OrderByExpr, error) {
+	col, err := p.parseIdent()
+	if err != nil {
+		return OrderByExpr{}, fmt.Errorf("ORDER BY: expected column name")
+	}
+	ob := OrderByExpr{Col: col.Text}
+	if p.peek().Kind == TokDesc {
+		p.consume()
+		ob.Desc = true
+	} else if p.peek().Kind == TokAsc {
+		p.consume()
+	}
+	return ob, nil
+}
+
+// parseIdent parses a name token. It accepts TokIdent and any keyword token
+// so that words like "avg", "sum", "count" can be used as column or alias names.
+func (p *parser) parseIdent() (Token, error) {
+	t := p.peek()
+	if t.Kind >= TokSelect && t.Kind <= TokMax {
+		return p.consume(), nil
+	}
+	if t.Kind == TokIdent {
+		return p.consume(), nil
+	}
+	return Token{}, fmt.Errorf("expected identifier, got %q", t.Text)
+}
+
 // parseColRef parses a column reference: "col", "table.col", or "table.*".
+// Keywords may be used as column names (e.g. a column aliased "avg" or "sum").
 func (p *parser) parseColRef() (string, error) {
-	name, err := p.expect(TokIdent)
+	name, err := p.parseIdent()
 	if err != nil {
 		return "", fmt.Errorf("expected column name")
 	}
@@ -311,7 +460,7 @@ func (p *parser) parseColRef() (string, error) {
 		p.consume()
 		return name.Text + ".*", nil
 	}
-	col, err := p.expect(TokIdent)
+	col, err := p.parseIdent()
 	if err != nil {
 		return "", fmt.Errorf("expected column name after '.'")
 	}

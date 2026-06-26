@@ -43,10 +43,20 @@ func statsForTable(statsMap map[string]*stats.TableStats, name string) *stats.Ta
 	return statsMap[strings.ToLower(name)]
 }
 
+// exprCols extracts the Col field from each SelectExpr for use by resolvers.
+// Only valid for non-aggregate queries (Agg == nil for all exprs).
+func exprCols(exprs []query.SelectExpr) []string {
+	cols := make([]string, len(exprs))
+	for i, e := range exprs {
+		cols[i] = e.Col
+	}
+	return cols
+}
+
 // ── single-table path (unchanged from Phase 10) ─────────────────────────────
 
 func planSingleTable(s *query.SelectStmt, tbl *catalog.Table, ts *stats.TableStats) (PhysicalNode, error) {
-	cols, idxs, err := resolveColumnsSingle(tbl, s.Columns)
+	cols, idxs, err := resolveColumnsSingle(tbl, exprCols(s.Columns))
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +190,7 @@ func planMultiTable(s *query.SelectStmt, tables []*catalog.Table, statsMap map[s
 
 	// Resolve SELECT columns against the combined schema.
 	combined := leftSchema // after all joins, leftSchema is the full combined schema
-	projCols, projIdxs, err := resolveColumnsMulti(s.Columns, combined)
+	projCols, projIdxs, err := resolveColumnsMulti(exprCols(s.Columns), combined)
 	if err != nil {
 		return nil, err
 	}

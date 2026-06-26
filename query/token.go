@@ -35,6 +35,17 @@ const (
 	TokDelete  // DELETE
 	TokUpdate  // UPDATE
 	TokSet     // SET
+	TokOrder   // ORDER
+	TokBy      // BY
+	TokAsc     // ASC
+	TokDesc    // DESC
+	TokGroup   // GROUP
+	TokHaving  // HAVING
+	TokCount   // COUNT
+	TokSum     // SUM
+	TokAvg     // AVG
+	TokMin     // MIN
+	TokMax     // MAX
 
 	// Literals
 	TokIdent  // unquoted identifier: table name, column name

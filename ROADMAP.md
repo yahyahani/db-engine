@@ -26,6 +26,7 @@ design decision in a real database engine exists, not just how to use one.
 | 12 | ✅ Done | Concurrency — MVCC, multiple readers/writers |
 | 13 | ✅ Done | Network — TCP server, wire protocol |
 | 14 | ✅ Done | DML — DELETE and UPDATE |
+| 15 | ✅ Done | Aggregates — COUNT/SUM/AVG/MIN/MAX, GROUP BY, HAVING, ORDER BY |
 
 ---
 
@@ -491,6 +492,57 @@ DELETE FROM users;                              -- deletes all rows
 
 UPDATE users SET age = 31 WHERE id = 1;
 UPDATE users SET score = 0, tag = 'reset';      -- multiple columns, no WHERE
+```
+
+### Phase 15 — Aggregates, GROUP BY, HAVING, ORDER BY
+
+**Package:** `executor/agg.go`, `query/`
+
+Adds the standard SQL aggregation and sorting pipeline, completing the core
+query language.
+
+**Aggregate functions** — five functions work on any INT column:
+
+| Function | Semantics |
+|----------|-----------|
+| `COUNT(*)` / `COUNT(col)` | Number of rows in the group |
+| `SUM(col)` | Sum of INT values |
+| `AVG(col)` | Integer average (truncated) |
+| `MIN(col)` | Smallest INT value |
+| `MAX(col)` | Largest INT value |
+
+Multiple aggregates can appear in the same SELECT list; aliases are supported
+(`COUNT(*) AS cnt`).
+
+**Execution model** — aggregate queries bypass the Volcano streaming path and
+use a two-step materialise-then-aggregate approach:
+1. Execute a `SELECT *` plan (respects WHERE and indexes) to get all matching
+   raw rows.
+2. Group by GROUP BY columns; compute aggregates per group.
+3. Filter groups with HAVING.
+4. Sort with ORDER BY.
+5. Apply LIMIT.
+
+This is the correct order: HAVING filters aggregate results, and ORDER BY sorts
+the final output, so both must run after materialisation.
+
+**ORDER BY on plain queries** — the regular SELECT path also gained ORDER BY
+support. When ORDER BY is present, the Limit node is removed from the plan (it
+would truncate the scan early), rows are collected, sorted, then trimmed to
+LIMIT.
+
+**Keyword-as-identifier fix** — column aliases and ORDER BY / HAVING column
+references can now be any SQL keyword (e.g., `AVG(score) AS avg`). `parseColRef`
+and `parseIdent` accept keyword tokens in name positions.
+
+New SQL syntax:
+```sql
+SELECT COUNT(*) FROM orders WHERE status = 1;
+SELECT SUM(amount), AVG(amount) FROM payments;
+SELECT dept, COUNT(*) AS cnt FROM employees GROUP BY dept;
+SELECT dept, AVG(salary) AS avg FROM employees
+       GROUP BY dept HAVING avg > 5000 ORDER BY avg DESC LIMIT 3;
+SELECT id, name FROM users ORDER BY name ASC;
 ```
 
 ---

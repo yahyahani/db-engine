@@ -153,7 +153,7 @@ func TestParseSelectStar(t *testing.T) {
 	if len(sel.From) != 1 || sel.From[0].Name != "products" {
 		t.Errorf("From: got %+v, want [{Name:products}]", sel.From)
 	}
-	if len(sel.Columns) != 1 || sel.Columns[0] != "*" {
+	if len(sel.Columns) != 1 || sel.Columns[0].Col != "*" {
 		t.Errorf("Columns: %+v", sel.Columns)
 	}
 	if sel.Where != nil {
@@ -167,7 +167,7 @@ func TestParseSelectColumns(t *testing.T) {
 		t.Fatalf("Parse: %v", err)
 	}
 	sel := stmt.(*SelectStmt)
-	if len(sel.Columns) != 2 || sel.Columns[0] != "id" || sel.Columns[1] != "name" {
+	if len(sel.Columns) != 2 || sel.Columns[0].Col != "id" || sel.Columns[1].Col != "name" {
 		t.Errorf("columns: %v", sel.Columns)
 	}
 }
@@ -305,7 +305,7 @@ func TestParseQualifiedColumn(t *testing.T) {
 		t.Fatalf("Parse: %v", err)
 	}
 	sel := stmt.(*SelectStmt)
-	if len(sel.Columns) != 2 || sel.Columns[0] != "u.id" || sel.Columns[1] != "u.name" {
+	if len(sel.Columns) != 2 || sel.Columns[0].Col != "u.id" || sel.Columns[1].Col != "u.name" {
 		t.Errorf("Columns: %v", sel.Columns)
 	}
 }

@@ -61,7 +61,7 @@ func andWhere(conds ...query.Condition) *query.WhereClause {
 // with the widest possible bounds.
 func TestPlanFullScan(t *testing.T) {
 	tbl := makeTable()
-	s := &query.SelectStmt{From: []query.TableRef{{Name: "users"}}, Columns: []string{"*"}}
+	s := &query.SelectStmt{From: []query.TableRef{{Name: "users"}}, Columns: []query.SelectExpr{{Col: "*"}}}
 	plan := mustPlan(t, s, tbl)
 
 	proj := rootProject(t, plan)
@@ -80,7 +80,7 @@ func TestPlanPointLookup(t *testing.T) {
 	tbl := makeTable()
 	s := &query.SelectStmt{
 		From: []query.TableRef{{Name: "users"}},
-		Columns:   []string{"*"},
+		Columns:   []query.SelectExpr{{Col: "*"}},
 		Where: andWhere(
 			query.Condition{Column: "id", Op: query.OpEq, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 42}},
 		),
@@ -101,7 +101,7 @@ func TestPlanRangeScan(t *testing.T) {
 	tbl := makeTable()
 	s := &query.SelectStmt{
 		From: []query.TableRef{{Name: "users"}},
-		Columns:   []string{"*"},
+		Columns:   []query.SelectExpr{{Col: "*"}},
 		Where: andWhere(
 			query.Condition{Column: "id", Op: query.OpGt, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 10}},
 			query.Condition{Column: "id", Op: query.OpLte, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 50}},
@@ -124,7 +124,7 @@ func TestPlanNonPKPredicateBecomesFilter(t *testing.T) {
 	tbl := makeTable()
 	s := &query.SelectStmt{
 		From: []query.TableRef{{Name: "users"}},
-		Columns:   []string{"*"},
+		Columns:   []query.SelectExpr{{Col: "*"}},
 		Where: andWhere(
 			query.Condition{Column: "age", Op: query.OpGt, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 18}},
 		),
@@ -149,7 +149,7 @@ func TestPlanMixedPredicates(t *testing.T) {
 	tbl := makeTable()
 	s := &query.SelectStmt{
 		From: []query.TableRef{{Name: "users"}},
-		Columns:   []string{"*"},
+		Columns:   []query.SelectExpr{{Col: "*"}},
 		Where: andWhere(
 			query.Condition{Column: "id", Op: query.OpGte, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 100}},
 			query.Condition{Column: "age", Op: query.OpLt, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 30}},
@@ -182,7 +182,7 @@ func TestPlanImpossibleRange(t *testing.T) {
 	tbl := makeTable()
 	s := &query.SelectStmt{
 		From: []query.TableRef{{Name: "users"}},
-		Columns:   []string{"*"},
+		Columns:   []query.SelectExpr{{Col: "*"}},
 		Where: andWhere(
 			query.Condition{Column: "id", Op: query.OpGt, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 50}},
 			query.Condition{Column: "id", Op: query.OpLt, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 10}},
@@ -205,7 +205,7 @@ func TestPlanLimit(t *testing.T) {
 	tbl := makeTable()
 	s := &query.SelectStmt{
 		From: []query.TableRef{{Name: "users"}},
-		Columns:   []string{"*"},
+		Columns:   []query.SelectExpr{{Col: "*"}},
 		Limit:     5,
 	}
 	plan := mustPlan(t, s, tbl)
@@ -226,7 +226,7 @@ func TestPlanLimit(t *testing.T) {
 // the correct ColIdxs.
 func TestPlanColumnProjection(t *testing.T) {
 	tbl := makeTable()
-	s := &query.SelectStmt{From: []query.TableRef{{Name: "users"}}, Columns: []string{"name", "id"}}
+	s := &query.SelectStmt{From: []query.TableRef{{Name: "users"}}, Columns: []query.SelectExpr{{Col: "name"}, {Col: "id"}}}
 	plan := mustPlan(t, s, tbl)
 	proj := rootProject(t, plan)
 	// name is column 1, id is column 0.
@@ -242,7 +242,7 @@ func TestPlanColumnProjection(t *testing.T) {
 // returns an error rather than silently ignoring it.
 func TestPlanUnknownColumnError(t *testing.T) {
 	tbl := makeTable()
-	s := &query.SelectStmt{From: []query.TableRef{{Name: "users"}}, Columns: []string{"missing"}}
+	s := &query.SelectStmt{From: []query.TableRef{{Name: "users"}}, Columns: []query.SelectExpr{{Col: "missing"}}}
 	_, err := Plan(s, []*catalog.Table{tbl}, nil)
 	if err == nil {
 		t.Fatal("expected error for unknown column, got nil")
@@ -253,7 +253,7 @@ func TestPlanUnknownColumnError(t *testing.T) {
 // full-table-scan plan.
 func TestExplainFullScan(t *testing.T) {
 	tbl := makeTable()
-	s := &query.SelectStmt{From: []query.TableRef{{Name: "users"}}, Columns: []string{"*"}}
+	s := &query.SelectStmt{From: []query.TableRef{{Name: "users"}}, Columns: []query.SelectExpr{{Col: "*"}}}
 	plan := mustPlan(t, s, tbl)
 	out := Explain(plan)
 	if !strings.Contains(out, "IndexScan") {
@@ -272,7 +272,7 @@ func TestExplainPointLookup(t *testing.T) {
 	tbl := makeTable()
 	s := &query.SelectStmt{
 		From: []query.TableRef{{Name: "users"}},
-		Columns:   []string{"*"},
+		Columns:   []query.SelectExpr{{Col: "*"}},
 		Where: andWhere(
 			query.Condition{Column: "id", Op: query.OpEq, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 7}},
 		),
@@ -289,7 +289,7 @@ func TestExplainFilterAndLimit(t *testing.T) {
 	tbl := makeTable()
 	s := &query.SelectStmt{
 		From: []query.TableRef{{Name: "users"}},
-		Columns:   []string{"id"},
+		Columns:   []query.SelectExpr{{Col: "id"}},
 		Limit:     3,
 		Where: andWhere(
 			query.Condition{Column: "age", Op: query.OpGt, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 18}},
@@ -315,7 +315,7 @@ func TestPlanORTwoRanges(t *testing.T) {
 	tbl := makeTable()
 	s := &query.SelectStmt{
 		From: []query.TableRef{{Name: "users"}},
-		Columns:   []string{"*"},
+		Columns:   []query.SelectExpr{{Col: "*"}},
 		Where: &query.WhereClause{
 			Groups: [][]query.Condition{
 				{{Column: "id", Op: query.OpLt, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 5}}},
@@ -350,7 +350,7 @@ func TestPlanORWithNonPKCondition(t *testing.T) {
 	tbl := makeTable()
 	s := &query.SelectStmt{
 		From: []query.TableRef{{Name: "users"}},
-		Columns:   []string{"*"},
+		Columns:   []query.SelectExpr{{Col: "*"}},
 		Where: &query.WhereClause{
 			Groups: [][]query.Condition{
 				{{Column: "id", Op: query.OpEq, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 1}}},
@@ -383,7 +383,7 @@ func TestExplainORPlan(t *testing.T) {
 	tbl := makeTable()
 	s := &query.SelectStmt{
 		From: []query.TableRef{{Name: "users"}},
-		Columns:   []string{"*"},
+		Columns:   []query.SelectExpr{{Col: "*"}},
 		Where: &query.WhereClause{
 			Groups: [][]query.Condition{
 				{{Column: "id", Op: query.OpLt, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 5}}},
@@ -423,7 +423,7 @@ func TestPlanSecondaryIndexPointLookup(t *testing.T) {
 	tbl := makeIndexedTable()
 	s := &query.SelectStmt{
 		From: []query.TableRef{{Name: "users"}},
-		Columns:   []string{"*"},
+		Columns:   []query.SelectExpr{{Col: "*"}},
 		Where: andWhere(
 			query.Condition{Column: "age", Op: query.OpEq, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 25}},
 		),
@@ -448,7 +448,7 @@ func TestPlanSecondaryIndexRange(t *testing.T) {
 	tbl := makeIndexedTable()
 	s := &query.SelectStmt{
 		From: []query.TableRef{{Name: "users"}},
-		Columns:   []string{"*"},
+		Columns:   []query.SelectExpr{{Col: "*"}},
 		Where: andWhere(
 			query.Condition{Column: "age", Op: query.OpGt, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 18}},
 		),
@@ -469,7 +469,7 @@ func TestPlanSecondaryIndexWithExtraFilter(t *testing.T) {
 	tbl := makeIndexedTable()
 	s := &query.SelectStmt{
 		From: []query.TableRef{{Name: "users"}},
-		Columns:   []string{"*"},
+		Columns:   []query.SelectExpr{{Col: "*"}},
 		Where: andWhere(
 			query.Condition{Column: "age", Op: query.OpEq, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 25}},
 			query.Condition{Column: "name", Op: query.OpEq, Val: catalog.Value{Type: catalog.TypeText, TextVal: "Bob"}},
@@ -494,7 +494,7 @@ func TestPlanNoIndexFallsBackToPKScan(t *testing.T) {
 	tbl := makeTable() // no Indexes
 	s := &query.SelectStmt{
 		From: []query.TableRef{{Name: "users"}},
-		Columns:   []string{"*"},
+		Columns:   []query.SelectExpr{{Col: "*"}},
 		Where: andWhere(
 			query.Condition{Column: "age", Op: query.OpEq, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 25}},
 		),
@@ -515,7 +515,7 @@ func TestExplainIndexLookup(t *testing.T) {
 	tbl := makeIndexedTable()
 	s := &query.SelectStmt{
 		From: []query.TableRef{{Name: "users"}},
-		Columns:   []string{"*"},
+		Columns:   []query.SelectExpr{{Col: "*"}},
 		Where: andWhere(
 			query.Condition{Column: "age", Op: query.OpEq, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 30}},
 		),
@@ -560,7 +560,7 @@ func TestCBOSelectsIndexForHighlySelectiveQuery(t *testing.T) {
 	})
 	s := &query.SelectStmt{
 		From: []query.TableRef{{Name: "users"}},
-		Columns:   []string{"*"},
+		Columns:   []query.SelectExpr{{Col: "*"}},
 		Where: andWhere(
 			query.Condition{Column: "age", Op: query.OpEq, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 42}},
 		),
@@ -588,7 +588,7 @@ func TestCBOChoosesFullScanForLowSelectivity(t *testing.T) {
 	})
 	s := &query.SelectStmt{
 		From: []query.TableRef{{Name: "users"}},
-		Columns:   []string{"*"},
+		Columns:   []query.SelectExpr{{Col: "*"}},
 		Where: andWhere(
 			query.Condition{Column: "age", Op: query.OpEq, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 1}},
 		),
@@ -609,7 +609,7 @@ func TestCBONilStatsFallsBackToRuleBased(t *testing.T) {
 	tbl := makeIndexedTable()
 	s := &query.SelectStmt{
 		From: []query.TableRef{{Name: "users"}},
-		Columns:   []string{"*"},
+		Columns:   []query.SelectExpr{{Col: "*"}},
 		Where: andWhere(
 			query.Condition{Column: "age", Op: query.OpEq, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 42}},
 		),
@@ -647,7 +647,7 @@ func TestCBOPicksBestIndexAmongMultipleCandidates(t *testing.T) {
 	}
 	s := &query.SelectStmt{
 		From: []query.TableRef{{Name: "players"}},
-		Columns:   []string{"*"},
+		Columns:   []query.SelectExpr{{Col: "*"}},
 		Where: andWhere(
 			query.Condition{Column: "score", Op: query.OpEq, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 5}},
 			query.Condition{Column: "rank", Op: query.OpEq, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 99999}},
@@ -697,7 +697,7 @@ func TestPlanExplicitJoinProducesNLJ(t *testing.T) {
 	users := makeTable()
 	orders := makeOrdersTable()
 	s := &query.SelectStmt{
-		Columns: []string{"*"},
+		Columns: []query.SelectExpr{{Col: "*"}},
 		From:    []query.TableRef{{Name: "users", Alias: "u"}},
 		Joins: []query.JoinClause{{
 			Table: query.TableRef{Name: "orders", Alias: "o"},
@@ -724,7 +724,7 @@ func TestPlanImplicitJoinWithWhereProducesNLJ(t *testing.T) {
 	users := makeTable()
 	orders := makeOrdersTable()
 	s := &query.SelectStmt{
-		Columns: []string{"*"},
+		Columns: []query.SelectExpr{{Col: "*"}},
 		From: []query.TableRef{
 			{Name: "users", Alias: "u"},
 			{Name: "orders", Alias: "o"},
@@ -750,7 +750,7 @@ func TestPlanJoinPredicatePushdown(t *testing.T) {
 	users := makeTable()
 	orders := makeOrdersTable()
 	s := &query.SelectStmt{
-		Columns: []string{"*"},
+		Columns: []query.SelectExpr{{Col: "*"}},
 		From:    []query.TableRef{{Name: "users", Alias: "u"}},
 		Joins: []query.JoinClause{{
 			Table: query.TableRef{Name: "orders", Alias: "o"},
@@ -792,7 +792,7 @@ func TestPlanJoinExplain(t *testing.T) {
 	users := makeTable()
 	orders := makeOrdersTable()
 	s := &query.SelectStmt{
-		Columns: []string{"*"},
+		Columns: []query.SelectExpr{{Col: "*"}},
 		From:    []query.TableRef{{Name: "users", Alias: "u"}},
 		Joins: []query.JoinClause{{
 			Table: query.TableRef{Name: "orders", Alias: "o"},
