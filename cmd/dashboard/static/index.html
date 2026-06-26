@@ -571,6 +571,68 @@ body {
   vertical-align: middle;
 }
 
+/* ── Multi-statement result stack ──────────────────────────────────────────── */
+.multi-stack { animation: fadeIn .2s ease-out; }
+
+.stmt-card {
+  border-bottom: 1px solid var(--border);
+}
+.stmt-card:last-child { border-bottom: none; }
+
+.stmt-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 14px;
+  background: rgba(255,255,255,0.015);
+}
+
+.stmt-num {
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text-3);
+  font-size: 9.5px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  display: inline-flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+
+.stmt-dur {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+
+.stmt-rows {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--accent);
+  margin-left: auto;
+}
+
+.stmt-err-tag {
+  font-size: 9.5px;
+  font-weight: 600;
+  color: var(--red);
+  background: rgba(239,68,68,.1);
+  border: 1px solid rgba(239,68,68,.2);
+  border-radius: 3px;
+  padding: 1px 5px;
+  margin-left: auto;
+}
+
+.stmt-ok-msg {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 14px;
+  font-size: 12px;
+  color: var(--green);
+}
+
 /* ── Animations ────────────────────────────────────────────────────────────── */
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(3px); }
@@ -841,9 +903,8 @@ async function runQuery() {
   setRunning(true);
   try {
     const data = await apiPost('/api/query', { sql });
-    renderResults(data, false);
+    renderMultiResults(data);
 
-    // Refresh sidebar when schema changes.
     const up = sql.toUpperCase();
     if (/\b(CREATE|DROP|ANALYZE)\b/.test(up)) await loadTables();
   } catch (e) {
@@ -856,18 +917,18 @@ async function runQuery() {
 async function explainQuery() {
   let sql = editor.getValue().trim();
   if (!sql) return;
-  if (!sql.toUpperCase().startsWith('SELECT')) {
-    setStatus('EXPLAIN only works with SELECT statements', 'err');
+  // Strip multiple statements — EXPLAIN only makes sense for one SELECT.
+  const first = splitSQL(sql)[0];
+  if (!first || !first.toUpperCase().startsWith('SELECT')) {
+    setStatus('EXPLAIN only works with a SELECT statement', 'err');
     return;
   }
-  if (!sql.toUpperCase().startsWith('EXPLAIN')) {
-    sql = 'EXPLAIN ' + sql;
-  }
+  const explained = 'EXPLAIN ' + first;
 
   setRunning(true);
   try {
-    const data = await apiPost('/api/query', { sql });
-    renderResults(data, true);
+    const data = await apiPost('/api/query', { sql: explained });
+    renderMultiResults(data);
   } catch (e) {
     showError(e.message);
   } finally {
@@ -880,15 +941,37 @@ async function analyzeTable() {
   setRunning(true);
   try {
     const data = await apiPost('/api/query', { sql: `ANALYZE ${activeTableName}` });
-    if (data.error) {
-      setStatus(data.error, 'err');
+    const r = data.results && data.results[0];
+    if (r && r.error) {
+      setStatus(r.error, 'err');
     } else {
-      setStatus(data.message || 'ANALYZE complete', 'ok');
+      setStatus((r && r.message) || 'ANALYZE complete', 'ok');
       await loadTables();
     }
   } finally {
     setRunning(false);
   }
+}
+
+// splitSQL mirrors the server-side statement splitter (for the EXPLAIN button).
+function splitSQL(sql) {
+  const stmts = [];
+  let buf = '', inStr = false;
+  for (let i = 0; i < sql.length; i++) {
+    const ch = sql[i];
+    if (ch === "'" && !inStr) { inStr = true; buf += ch; }
+    else if (ch === "'" && inStr) {
+      if (sql[i+1] === "'") { buf += "''"; i++; }
+      else { inStr = false; buf += ch; }
+    } else if (ch === ';' && !inStr) {
+      const s = buf.trim();
+      if (s) stmts.push(s);
+      buf = '';
+    } else { buf += ch; }
+  }
+  const s = buf.trim();
+  if (s) stmts.push(s);
+  return stmts;
 }
 
 // ── Result rendering ────────────────────────────────────────────────────────
@@ -953,6 +1036,73 @@ function renderResults(data, isExplain) {
 
 function looksLikeExplain(msg) {
   return /\b(Project|IndexScan|IndexLookup|Filter|Limit|Union)\b/.test(msg);
+}
+
+// renderMultiResults handles the {results:[...], totalDuration:"..."} envelope
+// returned by /api/query for one or more statements.
+function renderMultiResults(data) {
+  if (!data.results || data.results.length === 0) {
+    showError('Empty response from server');
+    return;
+  }
+
+  // Single statement — use the existing per-result renderer directly.
+  if (data.results.length === 1) {
+    const r = data.results[0];
+    renderResults(r, looksLikeExplain(r.message || ''));
+    return;
+  }
+
+  // Multiple statements — stacked card view.
+  const body  = document.getElementById('results-body');
+  const label = document.getElementById('results-label');
+  const meta  = document.getElementById('results-meta');
+
+  label.textContent = `${data.results.length} statements`;
+  meta.textContent  = data.totalDuration;
+  body.innerHTML = `<div class="multi-stack">${data.results.map(buildResultCard).join('')}</div>`;
+
+  const firstErr = data.results.find(r => r.error);
+  if (firstErr) {
+    const n = data.results.indexOf(firstErr) + 1;
+    setStatus(`Statement ${n}: ${firstErr.error}`, 'err');
+    return;
+  }
+  const selects = data.results.filter(r => r.columns && r.columns.length > 0);
+  if (selects.length > 0) {
+    const last = selects[selects.length - 1];
+    const rw = last.rowCount === 1 ? '1 row' : `${fmtNum(last.rowCount)} rows`;
+    setStatus(`${data.results.length} statements · ${rw} · ${data.totalDuration}`, 'ok');
+  } else {
+    setStatus(`${data.results.length} statements · ${data.totalDuration}`, 'ok');
+  }
+}
+
+function buildResultCard(r, idx) {
+  const rowBadge = (r.columns && r.rowCount > 0)
+    ? `<span class="stmt-rows">${fmtNum(r.rowCount)} rows</span>` : '';
+  const errBadge = r.error ? `<span class="stmt-err-tag">error</span>` : '';
+
+  const header = `<div class="stmt-header">
+    <span class="stmt-num">${idx + 1}</span>
+    <span class="stmt-dur">${r.duration}</span>
+    ${rowBadge}${errBadge}
+  </div>`;
+
+  let content = '';
+  if (r.error) {
+    content = msgBox('error', '✕', r.error);
+  } else if (r.columns && r.columns.length > 0) {
+    content = r.rows.length === 0
+      ? `<div class="stmt-ok-msg" style="color:var(--text-3)">0 rows returned</div>`
+      : renderTable(r.columns, r.rows);
+  } else if (r.message) {
+    content = looksLikeExplain(r.message)
+      ? renderExplain(r.message)
+      : `<div class="stmt-ok-msg"><span>✓</span>${esc(r.message)}</div>`;
+  }
+
+  return `<div class="stmt-card">${header}${content}</div>`;
 }
 
 function renderTable(columns, rows) {

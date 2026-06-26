@@ -21,6 +21,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -73,6 +74,13 @@ type queryResp struct {
 	Duration string          `json:"duration"`
 	RowCount int             `json:"rowCount"`
 	Error    string          `json:"error,omitempty"`
+}
+
+// multiResult is the response for /api/query.
+// Results has one entry per SQL statement (split on ';').
+type multiResult struct {
+	Results       []queryResp `json:"results"`
+	TotalDuration string      `json:"totalDuration"`
 }
 
 type poolResp struct {
@@ -165,37 +173,30 @@ func (s *server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	start := time.Now()
-	s.mu.Lock()
-	res, execErr := s.db.Exec(req.SQL)
-	s.mu.Unlock()
-	dur := time.Since(start)
-
-	resp := queryResp{Duration: fmtDur(dur)}
-	if execErr != nil {
-		resp.Error = execErr.Error()
-		jsonOK(w, resp)
+	stmts := splitStatements(req.SQL)
+	if len(stmts) == 0 {
+		http.Error(w, "empty query", http.StatusBadRequest)
 		return
 	}
 
-	resp.Message = res.Message
-	if len(res.Columns) > 0 {
-		resp.Columns = res.Columns
-		resp.Rows = make([][]interface{}, len(res.Rows))
-		for i, row := range res.Rows {
-			cells := make([]interface{}, len(row))
-			for j, v := range row {
-				if v.Type == catalog.TypeInt {
-					cells[j] = v.IntVal
-				} else {
-					cells[j] = v.TextVal
-				}
-			}
-			resp.Rows[i] = cells
+	totalStart := time.Now()
+	results := make([]queryResp, 0, len(stmts))
+
+	for _, stmt := range stmts {
+		start := time.Now()
+		s.mu.Lock()
+		res, execErr := s.db.Exec(stmt)
+		s.mu.Unlock()
+		results = append(results, buildQueryResp(res, time.Since(start), execErr))
+		if execErr != nil {
+			break // stop on first error; partial results still returned
 		}
-		resp.RowCount = len(res.Rows)
 	}
-	jsonOK(w, resp)
+
+	jsonOK(w, multiResult{
+		Results:       results,
+		TotalDuration: fmtDur(time.Since(totalStart)),
+	})
 }
 
 func (s *server) handlePool(w http.ResponseWriter, r *http.Request) {
@@ -222,4 +223,69 @@ func fmtDur(d time.Duration) string {
 		return fmt.Sprintf("%dµs", d.Microseconds())
 	}
 	return fmt.Sprintf("%.1fms", float64(d.Microseconds())/1000.0)
+}
+
+// splitStatements splits SQL source on ';' while respecting single-quoted
+// string literals (including escaped '' inside strings).
+// Empty/whitespace-only fragments are dropped.
+func splitStatements(sql string) []string {
+	var stmts []string
+	var buf strings.Builder
+	inStr := false
+
+	for i := 0; i < len(sql); i++ {
+		ch := sql[i]
+		switch {
+		case ch == '\'' && !inStr:
+			inStr = true
+			buf.WriteByte(ch)
+		case ch == '\'' && inStr:
+			if i+1 < len(sql) && sql[i+1] == '\'' { // escaped ''
+				buf.WriteByte(ch)
+				buf.WriteByte(ch)
+				i++
+			} else {
+				inStr = false
+				buf.WriteByte(ch)
+			}
+		case ch == ';' && !inStr:
+			if s := strings.TrimSpace(buf.String()); s != "" {
+				stmts = append(stmts, s)
+			}
+			buf.Reset()
+		default:
+			buf.WriteByte(ch)
+		}
+	}
+	if s := strings.TrimSpace(buf.String()); s != "" {
+		stmts = append(stmts, s)
+	}
+	return stmts
+}
+
+// buildQueryResp converts an executor result + timing into a queryResp.
+func buildQueryResp(res *executor.Result, dur time.Duration, execErr error) queryResp {
+	resp := queryResp{Duration: fmtDur(dur)}
+	if execErr != nil {
+		resp.Error = execErr.Error()
+		return resp
+	}
+	resp.Message = res.Message
+	if len(res.Columns) > 0 {
+		resp.Columns = res.Columns
+		resp.Rows = make([][]interface{}, len(res.Rows))
+		for i, row := range res.Rows {
+			cells := make([]interface{}, len(row))
+			for j, v := range row {
+				if v.Type == catalog.TypeInt {
+					cells[j] = v.IntVal
+				} else {
+					cells[j] = v.TextVal
+				}
+			}
+			resp.Rows[i] = cells
+		}
+		resp.RowCount = len(res.Rows)
+	}
+	return resp
 }
