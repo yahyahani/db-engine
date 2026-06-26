@@ -28,6 +28,9 @@ var keywords = map[string]TokenKind{
 	"explain":  TokExplain,
 	"limit":    TokLimit,
 	"or":       TokOr,
+	"index":    TokIndex,
+	"on":       TokOn,
+	"drop":     TokDrop,
 }
 
 // Tokenize converts a SQL string into a flat slice of Tokens.

@@ -82,6 +82,34 @@ type Limit struct {
 	N     int
 }
 
+// IndexLookup scans a secondary index B-Tree for entries in [MinKey, MaxKey]
+// on the indexed column, then fetches each matching row's full columns from
+// the primary B-Tree via a PK point lookup.
+//
+// Why two B-Tree accesses per row?
+//   A secondary index stores only (indexed_col_value → primary_key).  The full
+//   row lives in the primary B-Tree.  So retrieving a row through a secondary
+//   index always requires two lookups:
+//
+//     1. Scan the secondary index to find matching PKs.   O(log n + k) total
+//     2. For each matching PK, fetch the full row from the primary B-Tree. O(log n) per row
+//
+//   This is the standard "index scan + heap fetch" pattern used by every RDBMS.
+//   PostgreSQL calls step 2 a "heap fetch"; MySQL InnoDB calls it a "clustered
+//   index lookup".  Our B-Tree is always clustered (primary key order), so step 2
+//   is identical to a PK point lookup.
+//
+//   The trade-off vs. a full primary scan: if the indexed column is highly
+//   selective (very few rows match), IndexLookup is much cheaper.  If almost
+//   every row matches, the double-lookup overhead makes it slower than a full
+//   scan.  A cost-based optimizer (Phase 10) would make this choice automatically.
+type IndexLookup struct {
+	Table  *catalog.Table
+	Index  *catalog.IndexDef // which secondary index to scan
+	MinKey uint64            // min indexed column value (inclusive)
+	MaxKey uint64            // max indexed column value (inclusive)
+}
+
 // Union merges the row streams from two or more sub-plans and deduplicates by
 // primary-key value.  It is emitted when a WHERE clause has multiple OR groups
 // that map to disjoint IndexScan ranges — each group becomes one child.
@@ -142,6 +170,22 @@ func (p *Project) explainLines(depth int, lines *[]string) {
 func (l *Limit) explainLines(depth int, lines *[]string) {
 	*lines = append(*lines, fmt.Sprintf("%sLimit  %d", indent(depth), l.N))
 	l.Child.explainLines(depth+1, lines)
+}
+
+func (il *IndexLookup) explainLines(depth int, lines *[]string) {
+	var desc string
+	switch {
+	case il.MinKey == il.MaxKey:
+		desc = fmt.Sprintf("IndexLookup  table=%s  index=%s  key=%d  (point lookup)",
+			strings.ToLower(il.Table.Name), il.Index.Name, il.MinKey)
+	case il.MinKey == 0 && il.MaxKey == math.MaxUint64:
+		desc = fmt.Sprintf("IndexLookup  table=%s  index=%s  range=[full scan]",
+			strings.ToLower(il.Table.Name), il.Index.Name)
+	default:
+		desc = fmt.Sprintf("IndexLookup  table=%s  index=%s  range=[%d..%d]",
+			strings.ToLower(il.Table.Name), il.Index.Name, il.MinKey, il.MaxKey)
+	}
+	*lines = append(*lines, indent(depth)+desc)
 }
 
 func (u *Union) explainLines(depth int, lines *[]string) {

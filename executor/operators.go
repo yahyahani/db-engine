@@ -18,6 +18,7 @@ package executor
 //   caller, so the output schema always matches the SELECT column list.
 
 import (
+	"encoding/binary"
 	"fmt"
 
 	"github.com/yahya/db-engine/btree"
@@ -41,25 +42,33 @@ type Operator interface {
 }
 
 // buildOp converts a physical plan node into an executable Operator.
-// ps is the PageStore (BufPager or TxPager) for the table being scanned.
-func buildOp(node planner.PhysicalNode, ps pager.PageStore, tbl *catalog.Table) (Operator, error) {
+//   ps  — PageStore for the primary table (BufPager or TxPager)
+//   db  — needed for IndexLookup to open the secondary index PageStore
+//   tbl — table schema
+func buildOp(node planner.PhysicalNode, ps pager.PageStore, db *DB, tbl *catalog.Table) (Operator, error) {
 	switch n := node.(type) {
 	case *planner.IndexScan:
 		return &scanOp{node: n, ps: ps, tbl: tbl}, nil
+	case *planner.IndexLookup:
+		idxPS, err := db.getOrOpenIndex(n.Index.Name)
+		if err != nil {
+			return nil, fmt.Errorf("open secondary index %q: %w", n.Index.Name, err)
+		}
+		return &indexLookupOp{node: n, ps: ps, idxPS: idxPS, tbl: tbl}, nil
 	case *planner.Filter:
-		child, err := buildOp(n.Child, ps, tbl)
+		child, err := buildOp(n.Child, ps, db, tbl)
 		if err != nil {
 			return nil, err
 		}
 		return &filterOp{child: child, preds: n.Preds, tbl: tbl}, nil
 	case *planner.Limit:
-		child, err := buildOp(n.Child, ps, tbl)
+		child, err := buildOp(n.Child, ps, db, tbl)
 		if err != nil {
 			return nil, err
 		}
 		return &limitOp{child: child, n: n.N}, nil
 	case *planner.Project:
-		child, err := buildOp(n.Child, ps, tbl)
+		child, err := buildOp(n.Child, ps, db, tbl)
 		if err != nil {
 			return nil, err
 		}
@@ -67,7 +76,7 @@ func buildOp(node planner.PhysicalNode, ps pager.PageStore, tbl *catalog.Table) 
 	case *planner.Union:
 		children := make([]Operator, len(n.Children))
 		for i, child := range n.Children {
-			op, err := buildOp(child, ps, tbl)
+			op, err := buildOp(child, ps, db, tbl)
 			if err != nil {
 				return nil, err
 			}
@@ -80,8 +89,8 @@ func buildOp(node planner.PhysicalNode, ps pager.PageStore, tbl *catalog.Table) 
 }
 
 // execute runs a plan to completion and returns all result rows.
-func execute(plan planner.PhysicalNode, ps pager.PageStore, tbl *catalog.Table) ([][]catalog.Value, error) {
-	op, err := buildOp(plan, ps, tbl)
+func execute(plan planner.PhysicalNode, ps pager.PageStore, db *DB, tbl *catalog.Table) ([][]catalog.Value, error) {
+	op, err := buildOp(plan, ps, db, tbl)
 	if err != nil {
 		return nil, err
 	}
@@ -143,6 +152,74 @@ func (s *scanOp) Next() ([]catalog.Value, bool, error) {
 func (s *scanOp) Close() error {
 	if s.cursor != nil {
 		return s.cursor.Close()
+	}
+	return nil
+}
+
+// --- indexLookupOp ---
+
+// indexLookupOp implements secondary-index-driven row retrieval.
+//
+// It maintains two B-Tree cursors:
+//   - A cursor on the secondary index B-Tree, scanning [MinKey, MaxKey] on the
+//     indexed column.  Each entry yields (indexed_value, pk_bytes).
+//   - For each PK found, a point lookup on the primary B-Tree returns the full
+//     encoded row.
+//
+// Value encoding in the secondary index:
+//   The 64-byte B-Tree value slot stores the primary key in the first 8 bytes
+//   (LittleEndian uint64); the remaining 56 bytes are unused.
+type indexLookupOp struct {
+	node    *planner.IndexLookup
+	ps      pager.PageStore // primary table PageStore
+	idxPS   pager.PageStore // secondary index PageStore
+	tbl     *catalog.Table
+	cursor  *btree.Cursor // cursor on secondary index
+	primary *btree.BTree  // primary B-Tree for PK point lookups
+}
+
+func (op *indexLookupOp) Open() error {
+	// Open secondary index B-Tree and position cursor at minKey.
+	idxBT, err := btree.Open(op.idxPS, 1)
+	if err != nil {
+		return fmt.Errorf("indexLookupOp: open secondary index: %w", err)
+	}
+	op.cursor, err = idxBT.NewCursor(op.node.MinKey, op.node.MaxKey)
+	if err != nil {
+		return fmt.Errorf("indexLookupOp: cursor: %w", err)
+	}
+	// Open primary B-Tree for PK lookups.
+	op.primary, err = btree.Open(op.ps, 1)
+	if err != nil {
+		return fmt.Errorf("indexLookupOp: open primary: %w", err)
+	}
+	return nil
+}
+
+func (op *indexLookupOp) Next() ([]catalog.Value, bool, error) {
+	for {
+		idxEntry, ok, err := op.cursor.Next()
+		if !ok || err != nil {
+			return nil, ok, err
+		}
+		// Extract PK from the first 8 bytes of the secondary index value slot.
+		pk := binary.LittleEndian.Uint64(idxEntry.Value[:8])
+		val, found, err := op.primary.Search(pk)
+		if err != nil {
+			return nil, false, fmt.Errorf("indexLookupOp: primary lookup pk=%d: %w", pk, err)
+		}
+		if !found {
+			// The index entry points to a non-existent PK — index is inconsistent.
+			// Skip rather than error so a partial index doesn't block all queries.
+			continue
+		}
+		return decodeRow(op.tbl, val), true, nil
+	}
+}
+
+func (op *indexLookupOp) Close() error {
+	if op.cursor != nil {
+		return op.cursor.Close()
 	}
 	return nil
 }

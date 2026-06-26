@@ -1,4 +1,4 @@
-// Package catalog manages table schemas for the database.
+// Package catalog manages table schemas and secondary index definitions.
 //
 // Why a catalog?
 //   The query executor needs to know column names, types, and order for every
@@ -16,7 +16,11 @@ import (
 	"strings"
 )
 
-const catalogMagic = uint32(0xCA7A1060)
+// catalogMagicV2 is the magic number for the current catalog format.
+// Bumped from V1 (0xCA7A1060) when secondary index definitions were added.
+// Open() rejects old catalogs with a clear error rather than silently
+// mis-reading the index count field as part of column data.
+const catalogMagicV2 = uint32(0xCA7A1061)
 
 // DataType is the set of column types supported in Phase 3.
 // Defined here (not in the query layer) because the catalog is the ground truth
@@ -57,10 +61,24 @@ func (v Value) String() string {
 	return v.TextVal
 }
 
+// IndexDef is the metadata for one secondary index.
+//
+// A secondary index stores (indexed_col_value → primary_key) in its own B-Tree
+// file named <dir>/<IndexName>.idx.  Only INT columns may be indexed in Phase 9
+// because the B-Tree key type is uint64 and TEXT values have no natural ordering
+// that fits in 8 bytes.  Non-unique indexed values are not supported: if two rows
+// share an indexed value the second INSERT will fail with a unique-constraint error.
+type IndexDef struct {
+	Name   string // unique index name across the database (e.g. "idx_users_age")
+	Table  string // lowercase table name
+	Column string // column name this index covers (must be TypeInt)
+}
+
 // Table is the schema for one relation.
 type Table struct {
 	Name    string
 	Columns []ColumnDef
+	Indexes []IndexDef // secondary indexes defined on this table
 }
 
 // PrimaryKeyIndex returns the index of the first INT column.
@@ -86,16 +104,33 @@ func (t *Table) ColIndex(name string) int {
 	return -1
 }
 
+// IndexForColumn returns the first IndexDef whose Column matches name
+// (case-insensitive), or nil if no index covers that column.
+func (t *Table) IndexForColumn(name string) *IndexDef {
+	lower := strings.ToLower(name)
+	for i := range t.Indexes {
+		if strings.ToLower(t.Indexes[i].Column) == lower {
+			return &t.Indexes[i]
+		}
+	}
+	return nil
+}
+
 // Catalog is an in-memory map of all table schemas, backed by a binary file.
 type Catalog struct {
-	tables map[string]*Table // keyed by lowercase table name
-	path   string
+	tables  map[string]*Table    // keyed by lowercase table name
+	indexes map[string]*IndexDef // keyed by lowercase index name (for DROP INDEX)
+	path    string
 }
 
 // New returns an empty Catalog backed by path.
 // Call Save() after mutations to persist changes.
 func New(path string) *Catalog {
-	return &Catalog{tables: make(map[string]*Table), path: path}
+	return &Catalog{
+		tables:  make(map[string]*Table),
+		indexes: make(map[string]*IndexDef),
+		path:    path,
+	}
 }
 
 // Load reads the catalog from path, or returns an empty Catalog if the file
@@ -118,7 +153,6 @@ func Load(path string) (*Catalog, error) {
 }
 
 // Save atomically writes the catalog to disk.
-// We overwrite the file in place (Phase 4 will add WAL protection here).
 func (c *Catalog) Save() error {
 	f, err := os.Create(c.path)
 	if err != nil {
@@ -154,21 +188,93 @@ func (c *Catalog) Tables() []*Table {
 	return out
 }
 
+// CreateIndex registers a secondary index definition and saves immediately.
+//
+// Constraints:
+//   - The table must exist.
+//   - The column must be of TypeInt (B-Tree key is uint64).
+//   - The index name must be unique across the catalog.
+//   - Only one index per column per table is allowed in Phase 9.
+func (c *Catalog) CreateIndex(idx IndexDef) error {
+	tableKey := strings.ToLower(idx.Table)
+	tbl, ok := c.tables[tableKey]
+	if !ok {
+		return fmt.Errorf("table %q does not exist", idx.Table)
+	}
+	colIdx := tbl.ColIndex(idx.Column)
+	if colIdx < 0 {
+		return fmt.Errorf("column %q not found in table %q", idx.Column, idx.Table)
+	}
+	if tbl.Columns[colIdx].Type != TypeInt {
+		return fmt.Errorf("column %q is %s; only INT columns may be indexed in Phase 9",
+			idx.Column, tbl.Columns[colIdx].Type)
+	}
+	// Prevent duplicate index names.
+	idxKey := strings.ToLower(idx.Name)
+	if _, exists := c.indexes[idxKey]; exists {
+		return fmt.Errorf("index %q already exists", idx.Name)
+	}
+	// Prevent two indexes on the same column.
+	if existing := tbl.IndexForColumn(idx.Column); existing != nil {
+		return fmt.Errorf("column %q already has an index (%q)", idx.Column, existing.Name)
+	}
+
+	idx.Table = tableKey
+	idx.Column = strings.ToLower(idx.Column)
+	tbl.Indexes = append(tbl.Indexes, idx)
+	c.indexes[idxKey] = &tbl.Indexes[len(tbl.Indexes)-1]
+	return c.Save()
+}
+
+// DropIndex removes a secondary index definition and saves immediately.
+func (c *Catalog) DropIndex(indexName string) error {
+	key := strings.ToLower(indexName)
+	def, ok := c.indexes[key]
+	if !ok {
+		return fmt.Errorf("index %q does not exist", indexName)
+	}
+	tbl, ok := c.tables[def.Table]
+	if !ok {
+		return fmt.Errorf("table %q not found for index %q", def.Table, indexName)
+	}
+	// Remove from table's Indexes slice.
+	for i, idx := range tbl.Indexes {
+		if strings.ToLower(idx.Name) == key {
+			tbl.Indexes = append(tbl.Indexes[:i], tbl.Indexes[i+1:]...)
+			break
+		}
+	}
+	delete(c.indexes, key)
+	return c.Save()
+}
+
+// GetIndex looks up an index by name (case-insensitive).
+func (c *Catalog) GetIndex(name string) (*IndexDef, bool) {
+	def, ok := c.indexes[strings.ToLower(name)]
+	return def, ok
+}
+
 // --- binary serialization ---
 //
-// File format:
-//   [0–3]  magic uint32 = 0xCA7A1060
+// File format (magic V2 = 0xCA7A1061):
+//
+//   [0–3]  magic    uint32 = 0xCA7A1061
 //   [4–5]  numTables uint16
 //   For each table:
-//     nameLen uint8  + name bytes
-//     numCols uint8
+//     nameLen   uint8  + name bytes
+//     numCols   uint8
 //     For each column:
 //       colNameLen uint8 + colName bytes
 //       colType    uint8
+//     numIndexes uint8
+//     For each index:
+//       idxNameLen uint8 + idxName bytes
+//       colNameLen uint8 + colName bytes
+//       (Table name is implicit — it is the current table)
 
 func (c *Catalog) serialize(w io.Writer) error {
 	var magic [4]byte
-	binary.LittleEndian.PutUint32(magic[:], catalogMagic)
+	binary.LittleEndian.PutUint32(magic[:], catalogMagicV2)
 	if _, err := w.Write(magic[:]); err != nil {
 		return err
 	}
@@ -190,8 +296,12 @@ func (c *Catalog) deserialize(r io.Reader) error {
 	if _, err := io.ReadFull(r, magic[:]); err != nil {
 		return fmt.Errorf("read magic: %w", err)
 	}
-	if binary.LittleEndian.Uint32(magic[:]) != catalogMagic {
-		return fmt.Errorf("bad magic number — file is not a catalog")
+	m := binary.LittleEndian.Uint32(magic[:])
+	if m == uint32(0xCA7A1060) {
+		return fmt.Errorf("catalog format V1 is no longer supported; recreate the database")
+	}
+	if m != catalogMagicV2 {
+		return fmt.Errorf("bad magic number 0x%08X — file is not a catalog", m)
 	}
 	var n [2]byte
 	if _, err := io.ReadFull(r, n[:]); err != nil {
@@ -203,7 +313,11 @@ func (c *Catalog) deserialize(r io.Reader) error {
 		if err != nil {
 			return fmt.Errorf("read table %d: %w", i, err)
 		}
-		c.tables[strings.ToLower(t.Name)] = t
+		key := strings.ToLower(t.Name)
+		c.tables[key] = t
+		for i := range t.Indexes {
+			c.indexes[strings.ToLower(t.Indexes[i].Name)] = &t.Indexes[i]
+		}
 	}
 	return nil
 }
@@ -231,6 +345,26 @@ func writeTable(w io.Writer, t *Table) error {
 			return err
 		}
 	}
+	// Indexes (Phase 9 addition)
+	if _, err := w.Write([]byte{byte(len(t.Indexes))}); err != nil {
+		return err
+	}
+	for _, idx := range t.Indexes {
+		in := []byte(idx.Name)
+		if _, err := w.Write([]byte{byte(len(in))}); err != nil {
+			return err
+		}
+		if _, err := w.Write(in); err != nil {
+			return err
+		}
+		col := []byte(idx.Column)
+		if _, err := w.Write([]byte{byte(len(col))}); err != nil {
+			return err
+		}
+		if _, err := w.Write(col); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -243,6 +377,8 @@ func readTable(r io.Reader) (*Table, error) {
 	if _, err := io.ReadFull(r, nameBuf); err != nil {
 		return nil, err
 	}
+	tableName := string(nameBuf)
+
 	var ncols [1]byte
 	if _, err := io.ReadFull(r, ncols[:]); err != nil {
 		return nil, err
@@ -263,5 +399,36 @@ func readTable(r io.Reader) (*Table, error) {
 		}
 		cols[i] = ColumnDef{Name: string(cn), Type: DataType(ct[0])}
 	}
-	return &Table{Name: string(nameBuf), Columns: cols}, nil
+
+	// Read indexes (Phase 9 addition)
+	var nidx [1]byte
+	if _, err := io.ReadFull(r, nidx[:]); err != nil {
+		return nil, fmt.Errorf("read index count: %w", err)
+	}
+	idxs := make([]IndexDef, nidx[0])
+	for i := range idxs {
+		var inLen [1]byte
+		if _, err := io.ReadFull(r, inLen[:]); err != nil {
+			return nil, err
+		}
+		inBuf := make([]byte, inLen[0])
+		if _, err := io.ReadFull(r, inBuf); err != nil {
+			return nil, err
+		}
+		var colLen [1]byte
+		if _, err := io.ReadFull(r, colLen[:]); err != nil {
+			return nil, err
+		}
+		colBuf := make([]byte, colLen[0])
+		if _, err := io.ReadFull(r, colBuf); err != nil {
+			return nil, err
+		}
+		idxs[i] = IndexDef{
+			Name:   string(inBuf),
+			Table:  strings.ToLower(tableName),
+			Column: string(colBuf),
+		}
+	}
+
+	return &Table{Name: tableName, Columns: cols, Indexes: idxs}, nil
 }

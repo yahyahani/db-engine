@@ -586,3 +586,194 @@ func contains(s, substr string) bool {
 
 // keep catalog import used
 var _ = catalog.TypeInt
+
+// --- Phase 9: secondary index tests ---
+
+// TestCreateIndexSQL verifies that CREATE INDEX succeeds and is reflected in the catalog.
+func TestCreateIndexSQL(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+
+	mustExec(t, db, "CREATE TABLE users (id INT, name TEXT, age INT)")
+	res := mustExec(t, db, "CREATE INDEX idx_users_age ON users (age)")
+	if res.Message == "" {
+		t.Error("expected non-empty message for CREATE INDEX")
+	}
+
+	tbl, ok := db.catalog.GetTable("users")
+	if !ok {
+		t.Fatal("table not found")
+	}
+	if len(tbl.Indexes) != 1 || tbl.Indexes[0].Name != "idx_users_age" {
+		t.Errorf("unexpected indexes after CREATE INDEX: %+v", tbl.Indexes)
+	}
+}
+
+// TestCreateIndexOnNonexistentTable verifies that CREATE INDEX on a missing table fails.
+func TestCreateIndexOnNonexistentTable(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+
+	if _, err := db.Exec("CREATE INDEX idx ON ghost (id)"); err == nil {
+		t.Error("expected error for CREATE INDEX on nonexistent table")
+	}
+}
+
+// TestCreateIndexOnTextColumn verifies that CREATE INDEX on a TEXT column fails.
+func TestCreateIndexOnTextColumn(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+
+	mustExec(t, db, "CREATE TABLE t (id INT, name TEXT)")
+	if _, err := db.Exec("CREATE INDEX idx_name ON t (name)"); err == nil {
+		t.Error("expected error for CREATE INDEX on TEXT column")
+	}
+}
+
+// TestCreateIndexDuplicate verifies that creating a second index on the same
+// column or with the same name fails.
+func TestCreateIndexDuplicate(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+
+	mustExec(t, db, "CREATE TABLE t (id INT, age INT)")
+	mustExec(t, db, "CREATE INDEX idx_age ON t (age)")
+
+	if _, err := db.Exec("CREATE INDEX idx_age ON t (age)"); err == nil {
+		t.Error("expected error for duplicate index name")
+	}
+	if _, err := db.Exec("CREATE INDEX idx_age2 ON t (age)"); err == nil {
+		t.Error("expected error for second index on same column")
+	}
+}
+
+// TestIndexMaintainedOnInsert inserts rows and verifies that the secondary
+// index is populated by checking that an index-driven SELECT returns the correct row.
+func TestIndexMaintainedOnInsert(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+
+	mustExec(t, db, "CREATE TABLE users (id INT, name TEXT, age INT)")
+	mustExec(t, db, "CREATE INDEX idx_users_age ON users (age)")
+
+	mustExec(t, db, "INSERT INTO users VALUES (1, 'Alice', 30)")
+	mustExec(t, db, "INSERT INTO users VALUES (2, 'Bob', 25)")
+	mustExec(t, db, "INSERT INTO users VALUES (3, 'Carol', 22)")
+
+	// Each age value is unique; look up age=25 which belongs to Bob (id=2).
+	res := mustExec(t, db, "SELECT id FROM users WHERE age = 25")
+	if len(res.Rows) != 1 || res.Rows[0][0].IntVal != 2 {
+		t.Fatalf("expected row id=2 for age=25, got %v", res.Rows)
+	}
+}
+
+// TestIndexDrivenSelectRange verifies that a range query on an indexed column
+// uses IndexLookup and returns the correct rows.
+func TestIndexDrivenSelectRange(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+
+	mustExec(t, db, "CREATE TABLE users (id INT, name TEXT, age INT)")
+	mustExec(t, db, "CREATE INDEX idx_users_age ON users (age)")
+
+	for i := 1; i <= 10; i++ {
+		mustExec(t, db, fmt.Sprintf("INSERT INTO users VALUES (%d, 'u%d', %d)", i, i, i*5))
+	}
+
+	// age >= 30 (ages 30,35,40,45,50 = rows 6,7,8,9,10)
+	res := mustExec(t, db, "SELECT id FROM users WHERE age >= 30")
+	if len(res.Rows) != 5 {
+		t.Fatalf("expected 5 rows for age>=30, got %d: %v", len(res.Rows), res.Rows)
+	}
+}
+
+// TestDuplicateIndexValueError verifies that inserting a row whose indexed
+// column value already exists in the index fails with a unique-constraint error.
+func TestDuplicateIndexValueError(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+
+	mustExec(t, db, "CREATE TABLE t (id INT, score INT)")
+	mustExec(t, db, "CREATE INDEX idx_score ON t (score)")
+
+	mustExec(t, db, "INSERT INTO t VALUES (1, 100)")
+	if _, err := db.Exec("INSERT INTO t VALUES (2, 100)"); err == nil {
+		t.Error("expected unique constraint error for duplicate indexed value")
+	}
+}
+
+// TestDropIndexSQL verifies that DROP INDEX removes the index from the catalog
+// and deletes the .idx file.
+func TestDropIndexSQL(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+
+	mustExec(t, db, "CREATE TABLE t (id INT, age INT)")
+	mustExec(t, db, "CREATE INDEX idx_age ON t (age)")
+
+	idxFile := db.indexPath("idx_age")
+	if _, err := os.Stat(idxFile); err != nil {
+		t.Fatalf("index file should exist after CREATE INDEX: %v", err)
+	}
+
+	res := mustExec(t, db, "DROP INDEX idx_age")
+	if res.Message == "" {
+		t.Error("expected non-empty message for DROP INDEX")
+	}
+
+	tbl, _ := db.catalog.GetTable("t")
+	if len(tbl.Indexes) != 0 {
+		t.Errorf("expected 0 indexes after DROP INDEX, got %d", len(tbl.Indexes))
+	}
+	if _, err := os.Stat(idxFile); !os.IsNotExist(err) {
+		t.Error("index file should be deleted after DROP INDEX")
+	}
+}
+
+// TestDropNonexistentIndex verifies that dropping an index that doesn't exist fails.
+func TestDropNonexistentIndex(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+
+	if _, err := db.Exec("DROP INDEX ghost_idx"); err == nil {
+		t.Error("expected error for DROP INDEX on nonexistent index")
+	}
+}
+
+// TestSelectFallsBackAfterDropIndex verifies that a SELECT on the indexed
+// column still works after the index is dropped (falls back to full scan).
+func TestSelectFallsBackAfterDropIndex(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+
+	mustExec(t, db, "CREATE TABLE users (id INT, name TEXT, age INT)")
+	mustExec(t, db, "CREATE INDEX idx_users_age ON users (age)")
+	mustExec(t, db, "INSERT INTO users VALUES (1, 'Alice', 30)")
+	mustExec(t, db, "INSERT INTO users VALUES (2, 'Bob', 25)")
+
+	mustExec(t, db, "DROP INDEX idx_users_age")
+
+	// After drop the query must fall back to a full scan filter and still return correct rows.
+	res := mustExec(t, db, "SELECT id FROM users WHERE age = 30")
+	if len(res.Rows) != 1 || res.Rows[0][0].IntVal != 1 {
+		t.Fatalf("expected row id=1, got %v", res.Rows)
+	}
+}
+
+// TestExplainIndexLookup verifies that EXPLAIN shows IndexLookup when an index
+// exists on the WHERE column.
+func TestExplainIndexLookup(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+
+	mustExec(t, db, "CREATE TABLE users (id INT, name TEXT, age INT)")
+	mustExec(t, db, "CREATE INDEX idx_users_age ON users (age)")
+
+	res := mustExec(t, db, "EXPLAIN SELECT * FROM users WHERE age = 25")
+	if !contains(res.Message, "IndexLookup") {
+		t.Errorf("expected 'IndexLookup' in EXPLAIN output, got:\n%s", res.Message)
+	}
+	if !contains(res.Message, "idx_users_age") {
+		t.Errorf("expected index name in EXPLAIN output, got:\n%s", res.Message)
+	}
+}

@@ -388,3 +388,135 @@ func TestExplainORPlan(t *testing.T) {
 		t.Errorf("expected 2 IndexScan nodes in explain output, got:\n%s", out)
 	}
 }
+
+// --- Phase 9: secondary index planning tests ---
+
+// makeIndexedTable returns a table with a secondary index on 'age'.
+func makeIndexedTable() *catalog.Table {
+	return &catalog.Table{
+		Name: "users",
+		Columns: []catalog.ColumnDef{
+			{Name: "id", Type: catalog.TypeInt},
+			{Name: "name", Type: catalog.TypeText},
+			{Name: "age", Type: catalog.TypeInt},
+		},
+		Indexes: []catalog.IndexDef{
+			{Name: "idx_users_age", Table: "users", Column: "age"},
+		},
+	}
+}
+
+// TestPlanSecondaryIndexPointLookup checks that WHERE age=25 on a table with
+// an index on age produces IndexLookup with MinKey==MaxKey==25.
+func TestPlanSecondaryIndexPointLookup(t *testing.T) {
+	tbl := makeIndexedTable()
+	s := &query.SelectStmt{
+		TableName: "users",
+		Columns:   []string{"*"},
+		Where: andWhere(
+			query.Condition{Column: "age", Op: query.OpEq, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 25}},
+		),
+	}
+	plan := mustPlan(t, s, tbl)
+	proj := rootProject(t, plan)
+	il, ok := proj.Child.(*IndexLookup)
+	if !ok {
+		t.Fatalf("expected *IndexLookup child of Project, got %T", proj.Child)
+	}
+	if il.MinKey != 25 || il.MaxKey != 25 {
+		t.Errorf("point lookup: want [25,25], got [%d,%d]", il.MinKey, il.MaxKey)
+	}
+	if il.Index == nil || il.Index.Name != "idx_users_age" {
+		t.Errorf("expected index idx_users_age, got %v", il.Index)
+	}
+}
+
+// TestPlanSecondaryIndexRange checks that WHERE age>18 produces IndexLookup
+// with MinKey==19.
+func TestPlanSecondaryIndexRange(t *testing.T) {
+	tbl := makeIndexedTable()
+	s := &query.SelectStmt{
+		TableName: "users",
+		Columns:   []string{"*"},
+		Where: andWhere(
+			query.Condition{Column: "age", Op: query.OpGt, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 18}},
+		),
+	}
+	proj := rootProject(t, mustPlan(t, s, tbl))
+	il, ok := proj.Child.(*IndexLookup)
+	if !ok {
+		t.Fatalf("expected *IndexLookup, got %T", proj.Child)
+	}
+	if il.MinKey != 19 || il.MaxKey != math.MaxUint64 {
+		t.Errorf("range: want [19, MaxUint64], got [%d, %d]", il.MinKey, il.MaxKey)
+	}
+}
+
+// TestPlanSecondaryIndexWithExtraFilter checks that WHERE age=25 AND name='Bob'
+// produces Filter(IndexLookup) — the extra condition stays in Filter.
+func TestPlanSecondaryIndexWithExtraFilter(t *testing.T) {
+	tbl := makeIndexedTable()
+	s := &query.SelectStmt{
+		TableName: "users",
+		Columns:   []string{"*"},
+		Where: andWhere(
+			query.Condition{Column: "age", Op: query.OpEq, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 25}},
+			query.Condition{Column: "name", Op: query.OpEq, Val: catalog.Value{Type: catalog.TypeText, TextVal: "Bob"}},
+		),
+	}
+	proj := rootProject(t, mustPlan(t, s, tbl))
+	f, ok := proj.Child.(*Filter)
+	if !ok {
+		t.Fatalf("expected Filter above IndexLookup, got %T", proj.Child)
+	}
+	if len(f.Preds) != 1 || f.Preds[0].Column != "name" {
+		t.Errorf("filter preds: expected [name], got %+v", f.Preds)
+	}
+	if _, ok := f.Child.(*IndexLookup); !ok {
+		t.Fatalf("expected IndexLookup below Filter, got %T", f.Child)
+	}
+}
+
+// TestPlanNoIndexFallsBackToPKScan checks that a table without a secondary
+// index on 'age' falls back to Filter(IndexScan).
+func TestPlanNoIndexFallsBackToPKScan(t *testing.T) {
+	tbl := makeTable() // no Indexes
+	s := &query.SelectStmt{
+		TableName: "users",
+		Columns:   []string{"*"},
+		Where: andWhere(
+			query.Condition{Column: "age", Op: query.OpEq, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 25}},
+		),
+	}
+	proj := rootProject(t, mustPlan(t, s, tbl))
+	f, ok := proj.Child.(*Filter)
+	if !ok {
+		t.Fatalf("expected Filter(IndexScan) fallback, got %T", proj.Child)
+	}
+	if _, ok := f.Child.(*IndexScan); !ok {
+		t.Fatalf("expected IndexScan below Filter, got %T", f.Child)
+	}
+}
+
+// TestExplainIndexLookup verifies that EXPLAIN output mentions "IndexLookup" and
+// the index name when a secondary index is used.
+func TestExplainIndexLookup(t *testing.T) {
+	tbl := makeIndexedTable()
+	s := &query.SelectStmt{
+		TableName: "users",
+		Columns:   []string{"*"},
+		Where: andWhere(
+			query.Condition{Column: "age", Op: query.OpEq, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 30}},
+		),
+	}
+	out := Explain(mustPlan(t, s, tbl))
+	if !strings.Contains(out, "IndexLookup") {
+		t.Errorf("expected 'IndexLookup' in explain output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "idx_users_age") {
+		t.Errorf("expected index name in explain output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "point lookup") {
+		t.Errorf("expected 'point lookup' in explain output, got:\n%s", out)
+	}
+}

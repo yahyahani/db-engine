@@ -66,6 +66,8 @@ func (p *parser) parseStatement() (Statement, error) {
 	switch p.peek().Kind {
 	case TokCreate:
 		return p.parseCreate()
+	case TokDrop:
+		return p.parseDrop()
 	case TokInsert:
 		return p.parseInsert()
 	case TokSelect:
@@ -82,13 +84,69 @@ func (p *parser) parseStatement() (Statement, error) {
 		p.consume()
 		return &RollbackStmt{}, nil
 	default:
-		return nil, fmt.Errorf("expected SELECT, INSERT, CREATE, EXPLAIN, BEGIN, COMMIT, or ROLLBACK — got %q", p.peek().Text)
+		return nil, fmt.Errorf("expected SELECT, INSERT, CREATE, DROP, EXPLAIN, BEGIN, COMMIT, or ROLLBACK — got %q", p.peek().Text)
 	}
 }
 
-// parseCreate parses: CREATE TABLE name (col type, ...)
-func (p *parser) parseCreate() (*CreateTableStmt, error) {
+// parseCreate dispatches between CREATE TABLE and CREATE INDEX.
+func (p *parser) parseCreate() (Statement, error) {
 	p.consume() // CREATE
+	switch p.peek().Kind {
+	case TokTable:
+		return p.parseCreateTable()
+	case TokIndex:
+		return p.parseCreateIndex()
+	default:
+		return nil, fmt.Errorf("CREATE: expected TABLE or INDEX, got %q", p.peek().Text)
+	}
+}
+
+// parseDrop parses: DROP INDEX name
+func (p *parser) parseDrop() (Statement, error) {
+	p.consume() // DROP
+	if p.peek().Kind != TokIndex {
+		return nil, fmt.Errorf("DROP: expected INDEX, got %q", p.peek().Text)
+	}
+	p.consume() // INDEX
+	name, err := p.expect(TokIdent)
+	if err != nil {
+		return nil, fmt.Errorf("DROP INDEX: expected index name")
+	}
+	return &DropIndexStmt{IndexName: name.Text}, nil
+}
+
+// parseCreateIndex parses: INDEX name ON table (column)
+// Called after CREATE has already been consumed.
+func (p *parser) parseCreateIndex() (*CreateIndexStmt, error) {
+	p.consume() // INDEX
+	name, err := p.expect(TokIdent)
+	if err != nil {
+		return nil, fmt.Errorf("CREATE INDEX: expected index name")
+	}
+	if p.peek().Kind != TokOn {
+		return nil, fmt.Errorf("CREATE INDEX %s: expected ON, got %q", name.Text, p.peek().Text)
+	}
+	p.consume() // ON
+	table, err := p.expect(TokIdent)
+	if err != nil {
+		return nil, fmt.Errorf("CREATE INDEX %s ON: expected table name", name.Text)
+	}
+	if _, err := p.expect(TokLParen); err != nil {
+		return nil, fmt.Errorf("CREATE INDEX %s ON %s: expected '('", name.Text, table.Text)
+	}
+	col, err := p.expect(TokIdent)
+	if err != nil {
+		return nil, fmt.Errorf("CREATE INDEX %s ON %s: expected column name", name.Text, table.Text)
+	}
+	if _, err := p.expect(TokRParen); err != nil {
+		return nil, fmt.Errorf("CREATE INDEX %s ON %s (%s: expected ')'", name.Text, table.Text, col.Text)
+	}
+	return &CreateIndexStmt{IndexName: name.Text, TableName: table.Text, Column: col.Text}, nil
+}
+
+// parseCreateTable parses: TABLE name (col type, ...)
+// Called after CREATE TABLE has already been consumed by parseCreate.
+func (p *parser) parseCreateTable() (*CreateTableStmt, error) {
 	if _, err := p.expect(TokTable); err != nil {
 		return nil, fmt.Errorf("CREATE: expected TABLE, got %q", p.tokens[p.pos-1].Text)
 	}

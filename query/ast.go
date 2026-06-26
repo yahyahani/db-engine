@@ -73,6 +73,23 @@ type ExplainStmt struct {
 	Inner *SelectStmt
 }
 
+// CreateIndexStmt represents: CREATE INDEX name ON table (column)
+//
+// Only INT columns may be indexed (B-Tree key is uint64).
+// The index is always unique: two rows with the same indexed value will cause
+// the second INSERT to fail.  Non-unique indexes require a composite B-Tree key
+// and are deferred to a future phase.
+type CreateIndexStmt struct {
+	IndexName string
+	TableName string
+	Column    string
+}
+
+// DropIndexStmt represents: DROP INDEX name
+type DropIndexStmt struct {
+	IndexName string
+}
+
 // BeginStmt represents BEGIN — start an explicit transaction.
 type BeginStmt struct{}
 
@@ -82,7 +99,9 @@ type CommitStmt struct{}
 // RollbackStmt represents ROLLBACK — discard an explicit transaction.
 type RollbackStmt struct{}
 
-func (*CreateTableStmt) stmtNode() {}
+func (*CreateTableStmt) stmtNode()  {}
+func (*CreateIndexStmt) stmtNode() {}
+func (*DropIndexStmt) stmtNode()   {}
 func (*InsertStmt) stmtNode()      {}
 func (*SelectStmt) stmtNode()      {}
 func (*ExplainStmt) stmtNode()     {}

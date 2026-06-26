@@ -25,6 +25,9 @@ const (
 	TokExplain // EXPLAIN
 	TokLimit   // LIMIT
 	TokOr      // OR
+	TokIndex   // INDEX
+	TokOn      // ON
+	TokDrop    // DROP
 
 	// Literals
 	TokIdent  // unquoted identifier: table name, column name
