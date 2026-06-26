@@ -1,0 +1,13 @@
+services:
+  dashboard:
+    build: .
+    # Port 0 tells Docker to pick any free host port automatically,
+    # so this never conflicts with other running containers.
+    # Run ./start.sh to see which port was assigned.
+    ports:
+      - "0:8080"
+    volumes:
+      # Database files are stored in ./data/ on your machine.
+      # Create this directory if it does not exist yet.
+      - ./data:/data
+    restart: unless-stopped
