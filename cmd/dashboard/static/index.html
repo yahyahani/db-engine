@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>db-engine</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0%25' stop-color='%23fb7185'/><stop offset='100%25' stop-color='%23fb923c'/></linearGradient></defs><rect x='2' y='2' width='20' height='20' rx='5' fill='url(%23g)'/><line x1='7' y1='9' x2='17' y2='9' stroke='white' stroke-width='1.8' stroke-linecap='round'/><line x1='7' y1='12' x2='17' y2='12' stroke='white' stroke-width='1.8' stroke-linecap='round'/><line x1='7' y1='15' x2='13' y2='15' stroke='white' stroke-width='1.8' stroke-linecap='round'/></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0%25' stop-color='%23fb7185'/><stop offset='100%25' stop-color='%23fb923c'/></linearGradient></defs><ellipse cx='12' cy='19' rx='8' ry='2.3' fill='url(%23g)' opacity='.4'/><rect x='4' y='6' width='16' height='13' fill='url(%23g)' opacity='.2'/><line x1='4' y1='6' x2='4' y2='19' stroke='url(%23g)' stroke-width='1.4'/><line x1='20' y1='6' x2='20' y2='19' stroke='url(%23g)' stroke-width='1.4'/><ellipse cx='12' cy='12' rx='8' ry='2.3' fill='url(%23g)' opacity='.35'/><ellipse cx='12' cy='6' rx='8' ry='2.3' fill='url(%23g)' opacity='.9'/></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -58,16 +58,16 @@ html[data-theme="light"] {
   --cm-op:         #71717a;
 }
 
-/* ── Dark theme ──────────────────────────────────────────────────────────── */
+/* ── Dark theme — warm brown-black ──────────────────────────────────────── */
 html[data-theme="dark"] {
-  --bg:            #1c1b1a;
-  --card-bg:       #272524;
-  --card-border:   rgba(255,255,255,.06);
-  --card-shadow:   0 4px 24px rgba(251,113,133,.07), 0 0 0 1px rgba(255,255,255,.04);
-  --text-1:        #f5f5f4;
-  --text-2:        #a8a29e;
-  --text-3:        #57534e;
-  --divider:       rgba(255,255,255,.07);
+  --bg:            #1a1614;
+  --card-bg:       #231e1c;
+  --card-border:   rgba(255,255,255,.07);
+  --card-shadow:   0 4px 28px rgba(0,0,0,.35), 0 0 0 1px rgba(255,255,255,.05);
+  --text-1:        #f5f0ee;
+  --text-2:        #a8a09c;
+  --text-3:        #5c5450;
+  --divider:       rgba(255,255,255,.08);
   --item-hover:    rgba(255,255,255,.05);
   --item-active:   rgba(251,113,133,.1);
   --active-border: rgba(251,113,133,.22);
@@ -84,9 +84,9 @@ html[data-theme="dark"] {
   --cyan:          #67e8f9;
   --tbl-stripe:    rgba(255,255,255,.02);
   --tbl-hover:     rgba(251,113,133,.06);
-  --cm-bg:         #1f1e1d;
-  --cm-gutter:     #1a1918;
-  --cm-gutter-b:   rgba(255,255,255,.04);
+  --cm-bg:         #1e1a18;
+  --cm-gutter:     #191512;
+  --cm-gutter-b:   rgba(255,255,255,.05);
   --cm-linenum:    #44403c;
   --cm-cursor:     #fb7185;
   --cm-select:     rgba(251,113,133,.15);
@@ -725,18 +725,25 @@ kbd {
   <header class="header glass">
     <div class="header-left">
       <div class="logo-wrap">
-        <!-- Table/data icon: rounded square with 3 row lines -->
+        <!-- Database cylinder logo -->
         <svg class="logo-svg" viewBox="0 0 28 28" fill="none">
           <defs>
-            <linearGradient id="logo-g" x1="0" y1="0" x2="1" y2="1">
+            <linearGradient id="cyl-g" x1="0" y1="0" x2="1" y2="1">
               <stop offset="0%" stop-color="#fb7185"/>
               <stop offset="100%" stop-color="#fb923c"/>
             </linearGradient>
           </defs>
-          <rect x="3" y="3" width="22" height="22" rx="6" fill="url(#logo-g)"/>
-          <line x1="8" y1="10" x2="20" y2="10" stroke="rgba(255,255,255,.9)" stroke-width="1.8" stroke-linecap="round"/>
-          <line x1="8" y1="14" x2="20" y2="14" stroke="rgba(255,255,255,.9)" stroke-width="1.8" stroke-linecap="round"/>
-          <line x1="8" y1="18" x2="15" y2="18" stroke="rgba(255,255,255,.7)" stroke-width="1.8" stroke-linecap="round"/>
+          <!-- bottom disk -->
+          <ellipse cx="14" cy="21" rx="9" ry="2.6" fill="url(#cyl-g)" opacity=".35"/>
+          <!-- cylinder walls -->
+          <rect x="5" y="7" width="18" height="14" fill="url(#cyl-g)" opacity=".18" rx="0"/>
+          <line x1="5"  y1="7"  x2="5"  y2="21" stroke="url(#cyl-g)" stroke-width="1.5"/>
+          <line x1="23" y1="7"  x2="23" y2="21" stroke="url(#cyl-g)" stroke-width="1.5"/>
+          <!-- middle shelf -->
+          <ellipse cx="14" cy="14" rx="9" ry="2.6" fill="url(#cyl-g)" opacity=".3"/>
+          <!-- top disk — brightest -->
+          <ellipse cx="14" cy="7" rx="9" ry="2.6" fill="url(#cyl-g)" opacity=".85"/>
+          <ellipse cx="14" cy="7" rx="5" ry="1.3" fill="white" opacity=".18"/>
         </svg>
         <span class="logo-text">db<span>-engine</span></span>
       </div>
@@ -850,13 +857,13 @@ kbd {
         </div>
         <div class="results-body" id="results-body">
           <div class="empty-state">
-            <!-- Table data icon — matches logo style -->
-            <svg class="empty-icon" width="52" height="52" viewBox="0 0 28 28" fill="none">
-              <rect x="3" y="3" width="22" height="22" rx="6" fill="var(--accent)" opacity=".12"/>
-              <rect x="3" y="3" width="22" height="22" rx="6" stroke="var(--accent)" stroke-width="1.4" opacity=".5"/>
-              <line x1="8" y1="10" x2="20" y2="10" stroke="var(--accent)" stroke-width="1.6" stroke-linecap="round" opacity=".8"/>
-              <line x1="8" y1="14" x2="20" y2="14" stroke="var(--accent)" stroke-width="1.6" stroke-linecap="round" opacity=".6"/>
-              <line x1="8" y1="18" x2="15" y2="18" stroke="var(--accent)" stroke-width="1.6" stroke-linecap="round" opacity=".4"/>
+            <!-- Database cylinder empty state -->
+            <svg class="empty-icon" width="56" height="56" viewBox="0 0 28 28" fill="none">
+              <ellipse cx="14" cy="21" rx="9" ry="2.6" stroke="var(--accent)" stroke-width="1.3" fill="var(--accent)" fill-opacity=".08"/>
+              <line x1="5"  y1="7"  x2="5"  y2="21" stroke="var(--accent)" stroke-width="1.3"/>
+              <line x1="23" y1="7"  x2="23" y2="21" stroke="var(--accent)" stroke-width="1.3"/>
+              <ellipse cx="14" cy="14" rx="9" ry="2.6" stroke="var(--accent)" stroke-width="1.3" fill="var(--accent)" fill-opacity=".05"/>
+              <ellipse cx="14" cy="7"  rx="9" ry="2.6" stroke="var(--accent)" stroke-width="1.3" fill="var(--accent)" fill-opacity=".15"/>
             </svg>
             <p>Run a query to see results</p>
           </div>
@@ -963,10 +970,11 @@ function renderSidebar() {
       <div class="tbl-item${active ? ' active' : ''}" onclick="selectTable(${q(t.name)})">
         <div class="tbl-row">
           <svg class="tbl-icon-svg" viewBox="0 0 14 14" fill="none" style="color:${iconColor}">
-            <rect x="1.5" y="1.5" width="11" height="11" rx="2.5" fill="currentColor" opacity=".15" stroke="currentColor" stroke-width="1.1"/>
-            <line x1="4" y1="5" x2="10" y2="5" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/>
-            <line x1="4" y1="7.5" x2="10" y2="7.5" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/>
-            <line x1="4" y1="10" x2="7.5" y2="10" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/>
+            <ellipse cx="7" cy="11" rx="5" ry="1.4" stroke="currentColor" stroke-width="1.1" fill="currentColor" fill-opacity=".12"/>
+            <line x1="2" y1="5" x2="2" y2="11" stroke="currentColor" stroke-width="1.1"/>
+            <line x1="12" y1="5" x2="12" y2="11" stroke="currentColor" stroke-width="1.1"/>
+            <ellipse cx="7" cy="7.5" rx="5" ry="1.4" stroke="currentColor" stroke-width="1.1" fill="currentColor" fill-opacity=".08"/>
+            <ellipse cx="7" cy="5" rx="5" ry="1.4" stroke="currentColor" stroke-width="1.1" fill="currentColor" fill-opacity=".25"/>
           </svg>
           <span class="tbl-name">${esc(t.name)}</span>
           ${rowCount ? `<span class="tbl-rows">${rowCount}</span>` : ''}
