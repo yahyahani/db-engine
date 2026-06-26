@@ -168,6 +168,29 @@ func (w *WAL) RecordCount() uint64 {
 	return w.records
 }
 
+// CommittedXIDs returns the set of all XIDs that have a RecordCommit entry.
+// Called by the executor after Open+Recover to restore MVCC visibility state:
+// rows inserted by these XIDs must be visible to new snapshots.
+func (w *WAL) CommittedXIDs() ([]uint32, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	records, err := w.readAllLocked()
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[uint32]struct{})
+	for _, r := range records {
+		if r.Type == RecordCommit {
+			seen[r.XID] = struct{}{}
+		}
+	}
+	out := make([]uint32, 0, len(seen))
+	for xid := range seen {
+		out = append(out, xid)
+	}
+	return out, nil
+}
+
 // Recover replays all committed writes from the WAL into the data files under dir.
 //
 // The algorithm is:

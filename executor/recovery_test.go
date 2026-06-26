@@ -59,15 +59,17 @@ const (
 //   therefore has a Begin(xid) with no matching Commit/Rollback.  Recovery
 //   correctly treats this as "not committed" and ignores it.
 func crashSimulate(db *DB) {
-	for key, ot := range db.openTbls {
+	db.openTbls.Range(func(k, v interface{}) bool {
+		ot := v.(*openTable)
 		db.pool.Unregister(ot.fid)
 		_ = ot.pg.Close()
-		delete(db.openTbls, key)
-	}
+		db.openTbls.Delete(k)
+		return true
+	})
 	// Sync + close the WAL file so the OS flushes its buffers.
 	// We do NOT append Commit or Rollback for any in-progress transaction.
 	_ = db.wal.Close()
-	db.activeTx = nil
+	db.txns.Range(func(k, _ interface{}) bool { db.txns.Delete(k); return true })
 }
 
 // zeroPage writes PageSize zero bytes at the offset for pageID in the file

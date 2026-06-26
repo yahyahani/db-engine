@@ -23,7 +23,7 @@ design decision in a real database engine exists, not just how to use one.
 | 9 | ✅ Done | Secondary indexes — non-PK indexes, index selection |
 | 10 | ✅ Done | Statistics — cardinality estimates, cost-based optimizer |
 | 11 | ✅ Done | JOIN — multi-table queries, nested-loop join, predicate pushdown |
-| 12 | 📋 Todo | Concurrency — MVCC, multiple readers/writers |
+| 12 | ✅ Done | Concurrency — MVCC, multiple readers/writers |
 | 13 | 📋 Todo | Network — TCP server, wire protocol |
 
 ---

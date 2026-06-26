@@ -20,8 +20,12 @@ import (
 // ValueSize is the fixed byte length of every value stored in a leaf entry.
 // We use a fixed size to keep encoding simple and predictable.
 // A real engine stores large values in overflow pages (heap tuples in PostgreSQL).
-// 64 bytes is enough for typical short strings and numeric records.
-const ValueSize = 64
+//
+// Phase 12 breakdown:
+//   Bytes  0– 3: xmin  uint32 — MVCC insert XID (written by executor)
+//   Bytes  4– 7: xmax  uint32 — MVCC delete XID (0 = live row)
+//   Bytes  8–71: user columns (64 bytes — same capacity as before Phase 12)
+const ValueSize = 72
 
 // nodeHeaderSize is the bytes at the start of page.Data reserved for node metadata.
 //
@@ -48,9 +52,9 @@ const InternalOrder = 338
 
 // LeafOrder is the maximum number of key-value entries in a leaf node.
 //
-// Per entry: 8 bytes (key) + 64 bytes (value) = 72 bytes
-//   8 + 72N ≤ 4072  →  N ≤ 56
-const LeafOrder = 56
+// Per entry: 8 bytes (key) + 72 bytes (value) = 80 bytes
+//   nodeHeaderSize(8) + 80N ≤ DataSize(4072)  →  N ≤ 50
+const LeafOrder = 50
 
 // NodeType distinguishes internal routing pages from leaf data pages.
 type NodeType uint8
@@ -100,7 +104,7 @@ type InternalNode struct {
 //
 // Page.Data layout:
 //   [0–7]   node header (type, numEntries, nextLeaf)
-//   [8–...]  entries: each 72 bytes = key uint64 + value [64]byte
+//   [8–...]  entries: each 80 bytes = key uint64 + value [72]byte
 func EncodeLeaf(n *LeafNode) (*storage.Page, error) {
 	if len(n.Entries) > LeafOrder {
 		return nil, fmt.Errorf("leaf %d: %d entries exceeds LeafOrder %d",

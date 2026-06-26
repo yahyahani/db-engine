@@ -1,7 +1,7 @@
 // Package executor ties the query language (query package) and schema storage
 // (catalog package) to the B+ Tree storage engine (btree + pager packages).
 //
-// Execution pipeline (Phase 6):
+// Execution pipeline:
 //
 //   SQL text
 //     → query.Parse()          (tokenise + parse into AST)
@@ -9,11 +9,7 @@
 //     → executor.execute()     (Volcano iterator: Project → Limit? → Filter? → IndexScan)
 //     → Result
 //
-// Before Phase 6 the executor contained ad-hoc planning logic (planKeyRange,
-// rowMatchesWhere, etc.) inlined inside execSelect.  That code is now in the
-// planner package, where it can be tested independently of the storage engine.
-//
-// Transaction model (Phase 4)
+// Transaction model (Phase 4 + Phase 12)
 //
 //   Each INSERT is protected by a WAL transaction.  The flow for a write:
 //
@@ -22,12 +18,33 @@
 //     3. Log Write records (after-images) for every dirty page
 //     4. Log Commit record + fsync WAL  ← durability point
 //     5. TxPager.Flush() → BufPager.WritePage (write-through: disk + pool)
+//     6. TxManager.MarkCommitted(xid) — make the row visible to new snapshots
 //
-//   If the process crashes between steps 4 and 5, WAL replay on next Open()
-//   re-applies the committed writes.  If it crashes before step 4, there is no
-//   Commit record and recovery skips those writes entirely.
+// MVCC (Phase 12)
 //
-// Buffer pool (Phase 5)
+//   Every row value in the B-Tree carries an 8-byte MVCC header:
+//
+//     xmin uint32 — XID of the transaction that inserted this row.
+//     xmax uint32 — XID of the transaction that deleted this row (0 = live).
+//
+//   At the start of each SELECT (or at BEGIN for explicit transactions) the
+//   executor takes a Snapshot from the TxManager — an immutable set of all
+//   committed XIDs at that moment.  Scan operators filter rows through
+//   Snapshot.IsVisible(xmin, xmax): only committed, non-deleted rows are
+//   returned to the caller.  Uncommitted inserts from concurrent transactions
+//   are invisible.
+//
+// Concurrency model (Phase 12)
+//
+//   DB.mu (sync.RWMutex) guards shared mutable state:
+//     - RLock: concurrent SELECT / EXPLAIN — multiple readers run in parallel.
+//     - Lock:  all writes (INSERT, BEGIN, COMMIT, ROLLBACK, DDL) — serialised.
+//
+//   The open-table registry (openTbls / openIdxs) is a sync.Map so table
+//   opening is safe even under RLock.  If two goroutines race to open the
+//   same table, the loser discards its handle and uses the winner's.
+//
+//   Buffer pool (Phase 5)
 //
 //   DB owns a single *bufferpool.Pool shared across all open table files.
 //   Table pagers stay open for the DB lifetime so the pool survives across
@@ -35,16 +52,21 @@
 package executor
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/yahya/db-engine/btree"
 	"github.com/yahya/db-engine/bufferpool"
 	"github.com/yahya/db-engine/catalog"
+	"github.com/yahya/db-engine/mvcc"
 	"github.com/yahya/db-engine/pager"
 	"github.com/yahya/db-engine/planner"
 	"github.com/yahya/db-engine/query"
@@ -53,13 +75,32 @@ import (
 	"github.com/yahya/db-engine/wal"
 )
 
+// goroutineID returns the current goroutine's numeric ID by parsing the first
+// line of its stack trace ("goroutine N [running]:").
+// This is used to implement per-goroutine transaction isolation: each goroutine
+// that calls BEGIN gets its own activeTx entry in db.txns, independent of any
+// transactions started by other goroutines on the same DB.
+func goroutineID() int64 {
+	var buf [64]byte
+	n := runtime.Stack(buf[:], false)
+	b := bytes.TrimPrefix(buf[:n], []byte("goroutine "))
+	if idx := bytes.IndexByte(b, ' '); idx > 0 {
+		id, _ := strconv.ParseInt(string(b[:idx]), 10, 64)
+		return id
+	}
+	return 0
+}
+
 const (
 	intColSize  = catalog.IntColSize  // bytes per INT column
 	textColSize = catalog.TextColSize // bytes per TEXT column; max 47 chars + null
 )
 
-// openFile tracks a table or secondary index file that is open for the session.
-// Reusing the same name for both keeps the map management uniform.
+// userDataSize is the bytes available for user columns in a B-Tree value slot
+// after reserving the MVCC header (xmin uint32 + xmax uint32 = 8 bytes).
+const userDataSize = btree.ValueSize - mvcc.HeaderSize
+
+// openTable tracks a table or secondary index file open for the session.
 type openTable struct {
 	pg  *pager.Pager
 	fid uint16
@@ -67,41 +108,63 @@ type openTable struct {
 }
 
 // DB is an open database backed by a directory.
-// Each table has its own B+ Tree file (<dir>/<table>.db).
-// Each secondary index has its own B+ Tree file (<dir>/<indexname>.idx).
-// The schema for all tables and indexes is in <dir>/catalog.
-// The WAL is in <dir>/wal.
-// Table statistics (collected by ANALYZE) are in <dir>/stats.
-// Both table and index pagers stay open for the lifetime of the DB so the
-// buffer pool can serve repeated reads without reopening files.
+//
+// Goroutine safety: multiple goroutines may call DB.Exec concurrently.
+// Reads (SELECT, EXPLAIN) run in parallel under db.mu.RLock.
+// Writes (INSERT, DDL, transaction control) serialise under db.mu.Lock.
+//
+// Each goroutine that issues BEGIN gets its own independent transaction stored
+// in db.txns (keyed by goroutine ID). Multiple goroutines can each have their
+// own in-flight explicit transaction simultaneously; they do not interfere.
 type DB struct {
-	dir      string
-	catalog  *catalog.Catalog
-	statsDB  *stats.StatsDB
-	wal      *wal.WAL
-	pool     *bufferpool.Pool
-	openTbls map[string]*openTable // lowercase table name → open table
-	openIdxs map[string]*openTable // lowercase index name → open index file
-	activeTx *activeTx             // non-nil when an explicit BEGIN is in progress
+	dir     string
+	catalog *catalog.Catalog
+	statsDB *stats.StatsDB
+	wal     *wal.WAL
+	pool    *bufferpool.Pool
+	txMgr   *mvcc.TxManager
+
+	mu       sync.RWMutex // RLock: concurrent reads; Lock: exclusive writes
+	openTbls sync.Map     // lowercase table name → *openTable
+	openIdxs sync.Map     // lowercase index name → *openTable
+
+	txns sync.Map // goroutine ID (int64) → *activeTx
 }
 
-// activeTx holds the state of an explicit transaction across multiple statements.
+// activeTx holds state of an explicit transaction across multiple statements.
 type activeTx struct {
 	xid    uint32
-	pagers map[string]*pager.TxPager // lowercase table name → TxPager
+	snap   mvcc.Snapshot             // snapshot taken at BEGIN; used for all reads
+	pagers map[string]*pager.TxPager // lowercase table/index key → TxPager
+}
+
+// goroutineTx returns the activeTx for the current goroutine, or nil.
+func (db *DB) goroutineTx() *activeTx {
+	if v, ok := db.txns.Load(goroutineID()); ok {
+		return v.(*activeTx)
+	}
+	return nil
+}
+
+// setGoroutineTx stores tx as the current goroutine's active transaction.
+func (db *DB) setGoroutineTx(tx *activeTx) {
+	db.txns.Store(goroutineID(), tx)
+}
+
+// clearGoroutineTx removes the current goroutine's active transaction.
+func (db *DB) clearGoroutineTx() {
+	db.txns.Delete(goroutineID())
 }
 
 // Result is returned by Exec for every statement.
-// For SELECT and EXPLAIN, Columns and/or Rows are populated.
-// For other statements, only Message is set.
 type Result struct {
-	Columns []string          // column headers
-	Rows    [][]catalog.Value // decoded row values
+	Columns []string
+	Rows    [][]catalog.Value
 	Message string
 }
 
 // Open opens (or creates) a database at dir, runs WAL crash recovery, and
-// initialises the shared buffer pool.
+// initialises the shared buffer pool and MVCC transaction manager.
 func Open(dir string) (*DB, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("create database directory %q: %w", dir, err)
@@ -128,69 +191,103 @@ func Open(dir string) (*DB, error) {
 		return nil, fmt.Errorf("load stats: %w", err)
 	}
 
+	// Restore MVCC visibility state: any XID that was committed before the
+	// previous shutdown (or crash) must be visible to new snapshots so that
+	// rows inserted by those transactions are readable after restart.
+	txMgr := mvcc.New()
+	committedXIDs, err := w.CommittedXIDs()
+	if err != nil {
+		_ = w.Close()
+		return nil, fmt.Errorf("restore committed XIDs: %w", err)
+	}
+	for _, xid := range committedXIDs {
+		txMgr.MarkCommitted(xid)
+	}
+
 	return &DB{
-		dir:      dir,
-		catalog:  cat,
-		statsDB:  sdb,
-		wal:      w,
-		pool:     bufferpool.New(bufferpool.DefaultCapacity),
-		openTbls: make(map[string]*openTable),
-		openIdxs: make(map[string]*openTable),
+		dir:     dir,
+		catalog: cat,
+		statsDB: sdb,
+		wal:     w,
+		pool:    bufferpool.New(bufferpool.DefaultCapacity),
+		txMgr:   txMgr,
 	}, nil
 }
 
-// Close rolls back any open transaction, closes all table and index pagers, and syncs the WAL.
+// Close rolls back any open transaction for the current goroutine, closes all
+// table and index pagers, and syncs the WAL.
 func (db *DB) Close() error {
-	if db.activeTx != nil {
-		_ = db.rollbackTx(db.activeTx)
-		db.activeTx = nil
+	if tx := db.goroutineTx(); tx != nil {
+		_ = db.rollbackTx(tx)
+		db.clearGoroutineTx()
 	}
-	for key, ot := range db.openTbls {
+	db.openTbls.Range(func(k, v interface{}) bool {
+		ot := v.(*openTable)
 		db.pool.Unregister(ot.fid)
 		_ = ot.pg.Close()
-		delete(db.openTbls, key)
-	}
-	for key, ot := range db.openIdxs {
+		db.openTbls.Delete(k)
+		return true
+	})
+	db.openIdxs.Range(func(k, v interface{}) bool {
+		ot := v.(*openTable)
 		db.pool.Unregister(ot.fid)
 		_ = ot.pg.Close()
-		delete(db.openIdxs, key)
-	}
+		db.openIdxs.Delete(k)
+		return true
+	})
 	return db.wal.Close()
 }
 
-// InTransaction reports whether an explicit BEGIN is in progress.
-func (db *DB) InTransaction() bool { return db.activeTx != nil }
+// InTransaction reports whether the current goroutine has an active BEGIN.
+func (db *DB) InTransaction() bool {
+	return db.goroutineTx() != nil
+}
 
 // PoolStats returns a snapshot of buffer pool metrics.
 func (db *DB) PoolStats() bufferpool.Stats { return db.pool.Stats() }
 
 // Exec parses and executes a SQL statement.
+// It is safe to call from multiple goroutines concurrently.
 func (db *DB) Exec(sql string) (*Result, error) {
 	stmt, err := query.Parse(sql)
 	if err != nil {
 		return nil, fmt.Errorf("parse error: %w", err)
 	}
 	switch s := stmt.(type) {
-	case *query.CreateTableStmt:
-		return db.execCreate(s)
-	case *query.CreateIndexStmt:
-		return db.execCreateIndex(s)
-	case *query.DropIndexStmt:
-		return db.execDropIndex(s)
-	case *query.AnalyzeStmt:
-		return db.execAnalyze(s)
-	case *query.InsertStmt:
-		return db.execInsert(s)
 	case *query.SelectStmt:
 		return db.execSelect(s)
 	case *query.ExplainStmt:
 		return db.execExplain(s)
 	case *query.BeginStmt:
+		db.mu.Lock()
+		defer db.mu.Unlock()
 		return db.execBegin()
 	case *query.CommitStmt:
+		db.mu.Lock()
+		defer db.mu.Unlock()
 		return db.execCommit()
 	case *query.RollbackStmt:
+		db.mu.Lock()
+		defer db.mu.Unlock()
 		return db.execRollback()
+	case *query.InsertStmt:
+		return db.execInsert(s)
+	case *query.CreateTableStmt:
+		db.mu.Lock()
+		defer db.mu.Unlock()
+		return db.execCreate(s)
+	case *query.CreateIndexStmt:
+		db.mu.Lock()
+		defer db.mu.Unlock()
+		return db.execCreateIndex(s)
+	case *query.DropIndexStmt:
+		db.mu.Lock()
+		defer db.mu.Unlock()
+		return db.execDropIndex(s)
+	case *query.AnalyzeStmt:
+		db.mu.Lock()
+		defer db.mu.Unlock()
+		return db.execAnalyze(s)
 	default:
 		return nil, fmt.Errorf("unsupported statement type %T", stmt)
 	}
@@ -198,48 +295,50 @@ func (db *DB) Exec(sql string) (*Result, error) {
 
 // --- transaction control ---
 
+// execBegin must be called with db.mu.Lock() held.
 func (db *DB) execBegin() (*Result, error) {
-	if db.activeTx != nil {
+	if db.goroutineTx() != nil {
 		return nil, fmt.Errorf("transaction already in progress; COMMIT or ROLLBACK first")
 	}
 	xid, err := db.wal.AllocXID()
 	if err != nil {
 		return nil, fmt.Errorf("begin: %w", err)
 	}
-	db.activeTx = &activeTx{
+	db.setGoroutineTx(&activeTx{
 		xid:    xid,
+		snap:   db.txMgr.TakeSnapshot(xid), // snapshot of committed XIDs at BEGIN time
 		pagers: make(map[string]*pager.TxPager),
-	}
+	})
 	return &Result{Message: "BEGIN"}, nil
 }
 
+// execCommit must be called with db.mu.Lock() held.
 func (db *DB) execCommit() (*Result, error) {
-	if db.activeTx == nil {
+	tx := db.goroutineTx()
+	if tx == nil {
 		return nil, fmt.Errorf("no active transaction")
 	}
-	tx := db.activeTx
-	db.activeTx = nil
+	db.clearGoroutineTx()
 	if err := db.commitTx(tx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
+	db.txMgr.MarkCommitted(tx.xid) // rows inserted by this tx become visible
 	return &Result{Message: "COMMIT"}, nil
 }
 
+// execRollback must be called with db.mu.Lock() held.
 func (db *DB) execRollback() (*Result, error) {
-	if db.activeTx == nil {
+	tx := db.goroutineTx()
+	if tx == nil {
 		return nil, fmt.Errorf("no active transaction")
 	}
-	tx := db.activeTx
-	db.activeTx = nil
+	db.clearGoroutineTx()
 	return &Result{Message: "ROLLBACK"}, db.rollbackTx(tx)
 }
 
-// commitTx logs all dirty pages to the WAL, fsyncs, then flushes them via BufPager
-// (write-through: disk + pool update in one step).
+// commitTx logs all dirty pages to the WAL, fsyncs, then flushes them via BufPager.
 func (db *DB) commitTx(tx *activeTx) error {
 	for key, txpg := range tx.pagers {
-		// Index pagers are keyed "idx:<name>" → file is "<name>.idx".
-		// Table pagers are keyed "<name>" → file is "<name>.db".
 		var fileName string
 		if strings.HasPrefix(key, "idx:") {
 			fileName = key[4:] + ".idx"
@@ -277,12 +376,13 @@ func (db *DB) rollbackTx(tx *activeTx) error {
 	return db.wal.AppendRollback(tx.xid)
 }
 
-// getOrOpenTable returns the BufPager for the named table, opening the pager
-// and registering it with the pool on first access.
+// getOrOpenTable returns the BufPager for the named table.
+// Safe to call from multiple goroutines; uses sync.Map for the registry.
+// If two goroutines race to open the same table, the loser discards its handle.
 func (db *DB) getOrOpenTable(name string) (*bufferpool.BufPager, error) {
 	key := strings.ToLower(name)
-	if ot, ok := db.openTbls[key]; ok {
-		return ot.bp, nil
+	if v, ok := db.openTbls.Load(key); ok {
+		return v.(*openTable).bp, nil
 	}
 	pg, err := pager.Open(db.tablePath(name))
 	if err != nil {
@@ -290,15 +390,22 @@ func (db *DB) getOrOpenTable(name string) (*bufferpool.BufPager, error) {
 	}
 	fid := db.pool.Register(pg)
 	bp := bufferpool.NewBufPager(db.pool, pg, fid)
-	db.openTbls[key] = &openTable{pg: pg, fid: fid, bp: bp}
+	ot := &openTable{pg: pg, fid: fid, bp: bp}
+	if actual, loaded := db.openTbls.LoadOrStore(key, ot); loaded {
+		// Another goroutine stored first; discard our copy.
+		db.pool.Unregister(fid)
+		_ = pg.Close()
+		return actual.(*openTable).bp, nil
+	}
 	return bp, nil
 }
 
-// txPagerForTable returns the TxPager for the named table in the active
-// transaction, wrapping a BufPager on first access.
+// txPagerForTable returns the TxPager for the named table in the current
+// goroutine's active transaction. Must be called with db.mu.Lock() held.
 func (db *DB) txPagerForTable(name string) (*pager.TxPager, error) {
+	tx := db.goroutineTx()
 	key := strings.ToLower(name)
-	if txpg, ok := db.activeTx.pagers[key]; ok {
+	if txpg, ok := tx.pagers[key]; ok {
 		return txpg, nil
 	}
 	bp, err := db.getOrOpenTable(name)
@@ -306,16 +413,16 @@ func (db *DB) txPagerForTable(name string) (*pager.TxPager, error) {
 		return nil, err
 	}
 	txpg := pager.NewTxPager(bp)
-	db.activeTx.pagers[key] = txpg
+	tx.pagers[key] = txpg
 	return txpg, nil
 }
 
-// getOrOpenIndex returns the BufPager for the named index, opening and
-// registering it with the pool on first access.
+// getOrOpenIndex returns the BufPager for the named index.
+// Safe to call from multiple goroutines; uses sync.Map for the registry.
 func (db *DB) getOrOpenIndex(indexName string) (*bufferpool.BufPager, error) {
 	key := strings.ToLower(indexName)
-	if ot, ok := db.openIdxs[key]; ok {
-		return ot.bp, nil
+	if v, ok := db.openIdxs.Load(key); ok {
+		return v.(*openTable).bp, nil
 	}
 	pg, err := pager.Open(db.indexPath(indexName))
 	if err != nil {
@@ -323,16 +430,21 @@ func (db *DB) getOrOpenIndex(indexName string) (*bufferpool.BufPager, error) {
 	}
 	fid := db.pool.Register(pg)
 	bp := bufferpool.NewBufPager(db.pool, pg, fid)
-	db.openIdxs[key] = &openTable{pg: pg, fid: fid, bp: bp}
+	ot := &openTable{pg: pg, fid: fid, bp: bp}
+	if actual, loaded := db.openIdxs.LoadOrStore(key, ot); loaded {
+		db.pool.Unregister(fid)
+		_ = pg.Close()
+		return actual.(*openTable).bp, nil
+	}
 	return bp, nil
 }
 
 // txPagerForIndex returns the TxPager for the named index in the active
-// transaction, wrapping a BufPager on first access.
+// transaction. Must be called with db.mu.Lock() held.
 func (db *DB) txPagerForIndex(indexName string) (*pager.TxPager, error) {
-	// Use a distinct key prefix so index pagers don't collide with table pagers.
+	tx := db.goroutineTx()
 	key := "idx:" + strings.ToLower(indexName)
-	if txpg, ok := db.activeTx.pagers[key]; ok {
+	if txpg, ok := tx.pagers[key]; ok {
 		return txpg, nil
 	}
 	bp, err := db.getOrOpenIndex(indexName)
@@ -340,12 +452,13 @@ func (db *DB) txPagerForIndex(indexName string) (*pager.TxPager, error) {
 		return nil, err
 	}
 	txpg := pager.NewTxPager(bp)
-	db.activeTx.pagers[key] = txpg
+	tx.pagers[key] = txpg
 	return txpg, nil
 }
 
 // --- CREATE TABLE ---
 
+// execCreate must be called with db.mu.Lock() held.
 func (db *DB) execCreate(s *query.CreateTableStmt) (*Result, error) {
 	tbl := &catalog.Table{Name: s.TableName, Columns: s.Columns}
 	if err := validateSchema(tbl); err != nil {
@@ -370,14 +483,8 @@ func (db *DB) execCreate(s *query.CreateTableStmt) (*Result, error) {
 
 // --- CREATE INDEX / DROP INDEX ---
 
-// execCreateIndex creates the secondary index B-Tree file and registers the
-// index definition in the catalog.
-//
-// The index is initially empty.  It is NOT back-filled with existing table
-// data — only rows inserted after CREATE INDEX are indexed.  Full back-fill
-// is deferred to a future phase (requires a table scan + bulk index build).
+// execCreateIndex must be called with db.mu.Lock() held.
 func (db *DB) execCreateIndex(s *query.CreateIndexStmt) (*Result, error) {
-	// Validate and register in catalog (also checks table + column existence).
 	def := catalog.IndexDef{
 		Name:   s.IndexName,
 		Table:  s.TableName,
@@ -386,8 +493,6 @@ func (db *DB) execCreateIndex(s *query.CreateIndexStmt) (*Result, error) {
 	if err := db.catalog.CreateIndex(def); err != nil {
 		return nil, err
 	}
-
-	// Create the B-Tree file for the index.
 	pg, err := pager.Open(db.indexPath(s.IndexName))
 	if err != nil {
 		return nil, fmt.Errorf("create index file: %w", err)
@@ -402,23 +507,18 @@ func (db *DB) execCreateIndex(s *query.CreateIndexStmt) (*Result, error) {
 	return &Result{Message: fmt.Sprintf("index %q created on %s(%s)", s.IndexName, s.TableName, s.Column)}, nil
 }
 
-// execDropIndex removes the secondary index B-Tree file and its catalog entry.
+// execDropIndex must be called with db.mu.Lock() held.
 func (db *DB) execDropIndex(s *query.DropIndexStmt) (*Result, error) {
 	key := strings.ToLower(s.IndexName)
-
-	// Close and evict the index file from the pool if it is open.
-	if ot, ok := db.openIdxs[key]; ok {
+	if v, ok := db.openIdxs.Load(key); ok {
+		ot := v.(*openTable)
 		db.pool.Unregister(ot.fid)
 		_ = ot.pg.Close()
-		delete(db.openIdxs, key)
+		db.openIdxs.Delete(key)
 	}
-
-	// Remove from catalog (also validates the index exists).
 	if err := db.catalog.DropIndex(s.IndexName); err != nil {
 		return nil, err
 	}
-
-	// Delete the index file.
 	if err := os.Remove(db.indexPath(s.IndexName)); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("remove index file: %w", err)
 	}
@@ -427,9 +527,7 @@ func (db *DB) execDropIndex(s *query.DropIndexStmt) (*Result, error) {
 
 // --- ANALYZE ---
 
-// execAnalyze performs a full table scan to collect statistics and persists
-// them to <dir>/stats.  Subsequent queries can then use cost-based plan
-// selection instead of the rule-based fallback.
+// execAnalyze must be called with db.mu.Lock() held.
 func (db *DB) execAnalyze(s *query.AnalyzeStmt) (*Result, error) {
 	tbl, ok := db.catalog.GetTable(s.TableName)
 	if !ok {
@@ -452,6 +550,8 @@ func (db *DB) execAnalyze(s *query.AnalyzeStmt) (*Result, error) {
 
 // --- INSERT ---
 
+// execInsert acquires db.mu.Lock for auto-commit; for explicit transactions the
+// lock is already held by the surrounding BEGIN…COMMIT block dispatch.
 func (db *DB) execInsert(s *query.InsertStmt) (*Result, error) {
 	tbl, ok := db.catalog.GetTable(s.TableName)
 	if !ok {
@@ -472,9 +572,10 @@ func (db *DB) execInsert(s *query.InsertStmt) (*Result, error) {
 		return nil, fmt.Errorf("table %q has no primary key column", tbl.Name)
 	}
 	key := s.Values[pkIdx].IntVal
-	encoded := encodeRow(tbl, s.Values)
 
-	if db.activeTx != nil {
+	if tx := db.goroutineTx(); tx != nil {
+		// Inside explicit transaction — lock already held by Exec dispatch.
+		encoded := encodeRow(tbl, s.Values, tx.xid)
 		txpg, err := db.txPagerForTable(s.TableName)
 		if err != nil {
 			return nil, err
@@ -486,21 +587,25 @@ func (db *DB) execInsert(s *query.InsertStmt) (*Result, error) {
 		if err := bt.Insert(key, encoded); err != nil {
 			return nil, fmt.Errorf("insert: %w", err)
 		}
-		// Maintain secondary indexes inside the same transaction.
 		if err := db.insertIntoIndexes(tbl, s.Values, key); err != nil {
 			return nil, err
 		}
 		return &Result{Message: "1 row inserted"}, nil
 	}
 
-	return db.autoCommitInsert(tbl, s.TableName, key, encoded, s.Values)
+	// Auto-commit: acquire write lock for the whole operation.
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	return db.autoCommitInsert(tbl, s.TableName, key, s.Values)
 }
 
-func (db *DB) autoCommitInsert(tbl *catalog.Table, tableName string, key uint64, encoded [btree.ValueSize]byte, values []catalog.Value) (*Result, error) {
+func (db *DB) autoCommitInsert(tbl *catalog.Table, tableName string, key uint64, values []catalog.Value) (*Result, error) {
 	xid, err := db.wal.AllocXID()
 	if err != nil {
 		return nil, err
 	}
+
+	encoded := encodeRow(tbl, values, xid)
 
 	bp, err := db.getOrOpenTable(tableName)
 	if err != nil {
@@ -524,7 +629,6 @@ func (db *DB) autoCommitInsert(tbl *catalog.Table, tableName string, key uint64,
 
 	pagers := map[string]*pager.TxPager{strings.ToLower(tableName): txpg}
 
-	// Maintain secondary indexes in the same transaction.
 	for _, idx := range tbl.Indexes {
 		colIdx := tbl.ColIndex(idx.Column)
 		if colIdx < 0 || values[colIdx].Type != catalog.TypeInt {
@@ -551,7 +655,6 @@ func (db *DB) autoCommitInsert(tbl *catalog.Table, tableName string, key uint64,
 			return nil, fmt.Errorf("open index B-Tree %q: %w", idx.Name, err)
 		}
 
-		// Check uniqueness: if the indexed value already exists, reject the insert.
 		if _, found, _ := idxBT.Search(idxKey); found {
 			for _, p := range pagers {
 				_ = p.Rollback()
@@ -562,7 +665,6 @@ func (db *DB) autoCommitInsert(tbl *catalog.Table, tableName string, key uint64,
 				idx.Name, idx.Column, idxKey)
 		}
 
-		// Encode the PK into the first 8 bytes of the index value slot.
 		var idxVal [btree.ValueSize]byte
 		binary.LittleEndian.PutUint64(idxVal[:8], key)
 		if err := idxBT.Insert(idxKey, idxVal); err != nil {
@@ -583,12 +685,13 @@ func (db *DB) autoCommitInsert(tbl *catalog.Table, tableName string, key uint64,
 		}
 		return nil, err
 	}
+	// Make the newly inserted row visible to snapshots taken after this point.
+	db.txMgr.MarkCommitted(xid)
 	return &Result{Message: "1 row inserted"}, nil
 }
 
-// insertIntoIndexes updates all secondary indexes for a row being inserted
-// inside an active explicit transaction.  It uses the transaction's existing
-// TxPagers (via txPagerForIndex) so all changes share the same XID.
+// insertIntoIndexes updates all secondary indexes inside an active explicit
+// transaction. Must be called with db.mu.Lock() held.
 func (db *DB) insertIntoIndexes(tbl *catalog.Table, values []catalog.Value, pk uint64) error {
 	for _, idx := range tbl.Indexes {
 		colIdx := tbl.ColIndex(idx.Column)
@@ -605,12 +708,10 @@ func (db *DB) insertIntoIndexes(tbl *catalog.Table, values []catalog.Value, pk u
 		if err != nil {
 			return fmt.Errorf("open index B-Tree %q: %w", idx.Name, err)
 		}
-
 		if _, found, _ := idxBT.Search(idxKey); found {
 			return fmt.Errorf("unique constraint violated: index %q already has an entry for %s=%d",
 				idx.Name, idx.Column, idxKey)
 		}
-
 		var idxVal [btree.ValueSize]byte
 		binary.LittleEndian.PutUint64(idxVal[:8], pk)
 		if err := idxBT.Insert(idxKey, idxVal); err != nil {
@@ -622,30 +723,41 @@ func (db *DB) insertIntoIndexes(tbl *catalog.Table, values []catalog.Value, pk u
 
 // --- SELECT ---
 
-// execSelect builds a physical plan via the planner package, then drives it
-// with the Volcano iterator model.
 func (db *DB) execSelect(s *query.SelectStmt) (*Result, error) {
+	// For an explicit transaction, re-use the snapshot taken at BEGIN so the
+	// transaction sees a consistent view across all its statements.
+	if tx := db.goroutineTx(); tx != nil {
+		return db.execSelectWithSnap(s, tx.snap)
+	}
+	// Auto-commit SELECT: take a fresh snapshot of currently committed XIDs.
+	snap := db.txMgr.TakeSnapshot(mvcc.XIDNone)
+	return db.execSelectWithSnap(s, snap)
+}
+
+func (db *DB) execSelectWithSnap(s *query.SelectStmt, snap mvcc.Snapshot) (*Result, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
 	tables, statsMap, err := db.collectTablesForSelect(s)
 	if err != nil {
 		return nil, err
 	}
-
 	plan, err := planner.Plan(s, tables, statsMap)
 	if err != nil {
 		return nil, err
 	}
-
-	rows, err := execute(plan, db)
+	rows, err := execute(plan, db, snap)
 	if err != nil {
 		return nil, err
 	}
-
 	proj := plan.(*planner.Project)
 	return &Result{Columns: proj.Columns, Rows: rows}, nil
 }
 
-// execExplain returns the physical plan as text without executing the query.
 func (db *DB) execExplain(s *query.ExplainStmt) (*Result, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
 	tables, statsMap, err := db.collectTablesForSelect(s.Inner)
 	if err != nil {
 		return nil, err
@@ -657,9 +769,6 @@ func (db *DB) execExplain(s *query.ExplainStmt) (*Result, error) {
 	return &Result{Message: planner.Explain(plan)}, nil
 }
 
-// collectTablesForSelect resolves all table references in a SELECT statement
-// and returns the ordered slice of *catalog.Table plus a stats map.
-// Order: s.From[0], s.From[1], …, s.Joins[0].Table, s.Joins[1].Table, …
 func (db *DB) collectTablesForSelect(s *query.SelectStmt) ([]*catalog.Table, map[string]*stats.TableStats, error) {
 	refs := make([]query.TableRef, 0, len(s.From)+len(s.Joins))
 	refs = append(refs, s.From...)
@@ -684,10 +793,10 @@ func (db *DB) collectTablesForSelect(s *query.SelectStmt) ([]*catalog.Table, map
 }
 
 // pageStoreFor returns the correct PageStore for a table:
-// the TxPager if inside an explicit transaction (for read-your-own-writes),
-// otherwise the BufPager (pool-cached reads).
+// TxPager inside an explicit transaction (read-your-own-writes),
+// BufPager otherwise (pool-cached concurrent reads).
 func (db *DB) pageStoreFor(tableName string) (pager.PageStore, error) {
-	if db.activeTx != nil {
+	if db.goroutineTx() != nil {
 		return db.txPagerForTable(tableName)
 	}
 	return db.getOrOpenTable(tableName)
@@ -695,9 +804,14 @@ func (db *DB) pageStoreFor(tableName string) (pager.PageStore, error) {
 
 // --- row encoding / decoding ---
 
-func encodeRow(tbl *catalog.Table, values []catalog.Value) [btree.ValueSize]byte {
+// encodeRow encodes user column values into a B-Tree value slot.
+// The 8-byte MVCC header (xmin=xid, xmax=0) occupies bytes 0–7.
+// User column data follows in bytes 8–71.
+func encodeRow(tbl *catalog.Table, values []catalog.Value, xid uint32) [btree.ValueSize]byte {
 	var buf [btree.ValueSize]byte
-	off := 0
+	binary.LittleEndian.PutUint32(buf[0:4], xid)         // xmin
+	binary.LittleEndian.PutUint32(buf[4:8], mvcc.XIDNone) // xmax = 0 (live)
+	off := mvcc.HeaderSize
 	for i, col := range tbl.Columns {
 		switch col.Type {
 		case catalog.TypeInt:
@@ -711,9 +825,11 @@ func encodeRow(tbl *catalog.Table, values []catalog.Value) [btree.ValueSize]byte
 	return buf
 }
 
+// decodeRow decodes user column values from a B-Tree value slot,
+// skipping the 8-byte MVCC header at the front.
 func decodeRow(tbl *catalog.Table, buf [btree.ValueSize]byte) []catalog.Value {
 	row := make([]catalog.Value, len(tbl.Columns))
-	off := 0
+	off := mvcc.HeaderSize // skip xmin + xmax
 	for i, col := range tbl.Columns {
 		switch col.Type {
 		case catalog.TypeInt:
@@ -748,9 +864,9 @@ func validateSchema(tbl *catalog.Table) error {
 			size += textColSize
 		}
 	}
-	if size > btree.ValueSize {
-		return fmt.Errorf("table %q: row size %d bytes exceeds B+ Tree value size %d",
-			tbl.Name, size, btree.ValueSize)
+	if size > userDataSize {
+		return fmt.Errorf("table %q: row size %d bytes exceeds available space %d (ValueSize=%d minus %d-byte MVCC header)",
+			tbl.Name, size, userDataSize, btree.ValueSize, mvcc.HeaderSize)
 	}
 	return nil
 }
@@ -765,6 +881,8 @@ func (db *DB) indexPath(name string) string {
 
 // Tables returns all tables in the catalog, sorted alphabetically by name.
 func (db *DB) Tables() []*catalog.Table {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
 	tables := db.catalog.Tables()
 	sort.Slice(tables, func(i, j int) bool {
 		return strings.ToLower(tables[i].Name) < strings.ToLower(tables[j].Name)

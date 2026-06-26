@@ -11,6 +11,11 @@ package executor
 //   For join results, left-table columns come first, then right-table columns.
 //   The Project operator selects and reorders columns before returning to the
 //   caller, so the output schema always matches the SELECT column list.
+//
+// MVCC (Phase 12):
+//   Scan operators receive a mvcc.Snapshot at Open time and filter every row
+//   through Snapshot.IsVisible(xmin, xmax).  Rows inserted by uncommitted
+//   transactions are skipped transparently; the caller never sees them.
 
 import (
 	"encoding/binary"
@@ -19,6 +24,7 @@ import (
 
 	"github.com/yahya/db-engine/btree"
 	"github.com/yahya/db-engine/catalog"
+	"github.com/yahya/db-engine/mvcc"
 	"github.com/yahya/db-engine/pager"
 	"github.com/yahya/db-engine/planner"
 	"github.com/yahya/db-engine/query"
@@ -34,15 +40,15 @@ type Operator interface {
 }
 
 // buildOp converts a physical plan node into an executable Operator.
-// It uses db to open PageStores so no ps/tbl arguments are needed.
-func buildOp(node planner.PhysicalNode, db *DB) (Operator, error) {
+// snap is passed to leaf scan operators so they can filter invisible rows.
+func buildOp(node planner.PhysicalNode, db *DB, snap mvcc.Snapshot) (Operator, error) {
 	switch n := node.(type) {
 	case *planner.IndexScan:
 		ps, err := db.pageStoreFor(n.Table.Name)
 		if err != nil {
 			return nil, fmt.Errorf("open table %q: %w", n.Table.Name, err)
 		}
-		return &scanOp{node: n, ps: ps, tbl: n.Table}, nil
+		return &scanOp{node: n, ps: ps, tbl: n.Table, snap: snap}, nil
 
 	case *planner.IndexLookup:
 		ps, err := db.pageStoreFor(n.Table.Name)
@@ -53,25 +59,25 @@ func buildOp(node planner.PhysicalNode, db *DB) (Operator, error) {
 		if err != nil {
 			return nil, fmt.Errorf("open secondary index %q: %w", n.Index.Name, err)
 		}
-		return &indexLookupOp{node: n, ps: ps, idxPS: idxPS, tbl: n.Table}, nil
+		return &indexLookupOp{node: n, ps: ps, idxPS: idxPS, tbl: n.Table, snap: snap}, nil
 
 	case *planner.Filter:
-		child, err := buildOp(n.Child, db)
+		child, err := buildOp(n.Child, db, snap)
 		if err != nil {
 			return nil, err
 		}
-		tbl := baseTable(n.Child) // nil-safe; nil = no tbl.ColIndex fallback
+		tbl := baseTable(n.Child)
 		return &filterOp{child: child, preds: n.Preds, tbl: tbl}, nil
 
 	case *planner.Limit:
-		child, err := buildOp(n.Child, db)
+		child, err := buildOp(n.Child, db, snap)
 		if err != nil {
 			return nil, err
 		}
 		return &limitOp{child: child, n: n.N}, nil
 
 	case *planner.Project:
-		child, err := buildOp(n.Child, db)
+		child, err := buildOp(n.Child, db, snap)
 		if err != nil {
 			return nil, err
 		}
@@ -80,7 +86,7 @@ func buildOp(node planner.PhysicalNode, db *DB) (Operator, error) {
 	case *planner.Union:
 		children := make([]Operator, len(n.Children))
 		for i, child := range n.Children {
-			op, err := buildOp(child, db)
+			op, err := buildOp(child, db, snap)
 			if err != nil {
 				return nil, err
 			}
@@ -89,11 +95,11 @@ func buildOp(node planner.PhysicalNode, db *DB) (Operator, error) {
 		return &unionOp{children: children, pkIdx: n.PkIdx}, nil
 
 	case *planner.NestedLoopJoin:
-		left, err := buildOp(n.Left, db)
+		left, err := buildOp(n.Left, db, snap)
 		if err != nil {
 			return nil, err
 		}
-		right, err := buildOp(n.Right, db)
+		right, err := buildOp(n.Right, db, snap)
 		if err != nil {
 			return nil, err
 		}
@@ -131,8 +137,9 @@ func baseTable(node planner.PhysicalNode) *catalog.Table {
 }
 
 // execute runs a plan to completion and returns all result rows.
-func execute(plan planner.PhysicalNode, db *DB) ([][]catalog.Value, error) {
-	op, err := buildOp(plan, db)
+// snap is the MVCC snapshot used to filter visible rows in scan operators.
+func execute(plan planner.PhysicalNode, db *DB, snap mvcc.Snapshot) ([][]catalog.Value, error) {
+	op, err := buildOp(plan, db, snap)
 	if err != nil {
 		return nil, err
 	}
@@ -158,10 +165,12 @@ func execute(plan planner.PhysicalNode, db *DB) ([][]catalog.Value, error) {
 // --- scanOp ---
 
 // scanOp reads rows lazily from the B-Tree using a Cursor.
+// Rows invisible under snap (uncommitted or deleted) are skipped transparently.
 type scanOp struct {
 	node   *planner.IndexScan
 	ps     pager.PageStore
 	tbl    *catalog.Table
+	snap   mvcc.Snapshot
 	cursor *btree.Cursor
 }
 
@@ -178,11 +187,18 @@ func (s *scanOp) Open() error {
 }
 
 func (s *scanOp) Next() ([]catalog.Value, bool, error) {
-	e, ok, err := s.cursor.Next()
-	if !ok || err != nil {
-		return nil, ok, err
+	for {
+		e, ok, err := s.cursor.Next()
+		if !ok || err != nil {
+			return nil, ok, err
+		}
+		xmin := binary.LittleEndian.Uint32(e.Value[0:4])
+		xmax := binary.LittleEndian.Uint32(e.Value[4:8])
+		if !s.snap.IsVisible(xmin, xmax) {
+			continue // skip rows from uncommitted or aborted transactions
+		}
+		return decodeRow(s.tbl, e.Value), true, nil
 	}
-	return decodeRow(s.tbl, e.Value), true, nil
 }
 
 func (s *scanOp) Close() error {
@@ -199,6 +215,7 @@ type indexLookupOp struct {
 	ps      pager.PageStore
 	idxPS   pager.PageStore
 	tbl     *catalog.Table
+	snap    mvcc.Snapshot
 	cursor  *btree.Cursor
 	primary *btree.BTree
 }
@@ -231,6 +248,12 @@ func (op *indexLookupOp) Next() ([]catalog.Value, bool, error) {
 			return nil, false, fmt.Errorf("indexLookupOp: primary lookup pk=%d: %w", pk, err)
 		}
 		if !found {
+			continue
+		}
+		// Apply MVCC visibility on the primary row.
+		xmin := binary.LittleEndian.Uint32(val[0:4])
+		xmax := binary.LittleEndian.Uint32(val[4:8])
+		if !op.snap.IsVisible(xmin, xmax) {
 			continue
 		}
 		return decodeRow(op.tbl, val), true, nil
