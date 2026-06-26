@@ -255,7 +255,7 @@ func TestParseWithSemicolon(t *testing.T) {
 }
 
 func TestParseErrorUnknownStatement(t *testing.T) {
-	if _, err := Parse("UPDATE foo SET x=1"); err == nil {
+	if _, err := Parse("TRUNCATE foo"); err == nil {
 		t.Error("expected error for unsupported statement")
 	}
 }

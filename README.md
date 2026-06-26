@@ -31,7 +31,7 @@ The result is a working database that can execute multi-table SQL queries, survi
 |---|---|---|
 | 💾 | **Storage engine** | Fixed 4 KiB pages, CRC32 checksums, free-page recycling |
 | 🌳 | **B+ Tree indexing** | Ordered key/value store, cursor-based range scans, lazy leaf traversal |
-| 📝 | **SQL parser** | `SELECT`, `INSERT`, `CREATE TABLE`, `WHERE`, `ORDER BY`, `LIMIT`, `JOIN` |
+| 📝 | **SQL parser** | `SELECT`, `INSERT`, `DELETE`, `UPDATE`, `CREATE TABLE`, `WHERE`, `ORDER BY`, `LIMIT`, `JOIN` |
 | 🔒 | **WAL & crash recovery** | Write-ahead log, no-steal/force policy, REDO-only recovery |
 | ♻️ | **Buffer pool** | Shared LRU page cache, pool hit/miss statistics |
 | 📊 | **Cost-based optimizer** | Column statistics, cardinality estimates, index vs. full-scan selection |
@@ -40,6 +40,7 @@ The result is a working database that can execute multi-table SQL queries, survi
 | 🔄 | **MVCC concurrency** | Snapshot isolation, per-goroutine explicit transactions, concurrent readers/writers |
 | 🌐 | **Web dashboard** | Live SQL editor, schema browser, buffer pool stats, query history |
 | 🔌 | **TCP server** | Length-prefixed JSON wire protocol, concurrent connections, graceful shutdown |
+| ✏️ | **DELETE & UPDATE** | MVCC-aware row deletion and update, secondary index maintenance, two-phase scan |
 
 ---
 
@@ -82,14 +83,14 @@ db-engine/
 ├── storage/        4 KiB page layout, CRC32 checksums, encode/decode
 ├── pager/          File I/O, page allocation, TxPager (no-steal write buffer)
 ├── bufferpool/     Shared LRU page cache across all open tables
-├── btree/          B+ Tree: nodes, cursor, insert, point lookup, range scan
+├── btree/          B+ Tree: nodes, cursor, insert, delete, point lookup, range scan
 ├── wal/            Write-ahead log: Begin/Write/Commit/Rollback records, Recover
 ├── catalog/        Table and column definitions, schema serialisation
 ├── query/          SQL lexer, parser, AST nodes
 ├── planner/        Physical plan generation, cost estimation, EXPLAIN
 ├── stats/          Per-column cardinality statistics for the cost model
 ├── mvcc/           TxManager, Snapshot, xmin/xmax visibility rules
-├── executor/       SQL dispatch, MVCC transactions, scan/index operators
+├── executor/       SQL dispatch, MVCC transactions, scan/index operators, DELETE/UPDATE (dml.go)
 ├── server/         TCP server, wire protocol (length-prefixed JSON frames)
 ├── client/         TCP client library (Dial, Exec, Close)
 └── cmd/
@@ -153,6 +154,8 @@ db> CREATE TABLE users (id INT, name TEXT, age INT);
 db> INSERT INTO users VALUES (1, 'Alice', 30);
 db> INSERT INTO users VALUES (2, 'Bob', 25);
 db> SELECT * FROM users WHERE age > 20;
+db> UPDATE users SET age = 31 WHERE id = 1;
+db> DELETE FROM users WHERE id = 2;
 db> SELECT u.name, o.amount FROM users u JOIN orders o ON u.id = o.user_id;
 db> EXPLAIN SELECT * FROM users WHERE id = 1;
 db> BEGIN;

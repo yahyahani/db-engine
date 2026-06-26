@@ -218,6 +218,50 @@ func (bt *BTree) RangeScan(minKey, maxKey uint64) ([]Entry, error) {
 // RootID exposes the root page ID for info/debug commands.
 func (bt *BTree) RootID() uint32 { return bt.rootID }
 
+// Delete removes key from the tree.
+// Returns (true, nil) if the key was found and removed, (false, nil) if absent.
+//
+// Implementation note: only the leaf entry is removed; internal separator keys
+// are left as-is (they still route correctly since the leaf chain is intact).
+// Leaves may underflow below the minimum fill threshold — no rebalancing is
+// performed. Space is recovered when the database is compacted (future work).
+func (bt *BTree) Delete(key uint64) (bool, error) {
+	return bt.deleteInNode(bt.rootID, key)
+}
+
+func (bt *BTree) deleteInNode(nodeID uint32, key uint64) (bool, error) {
+	p, err := bt.pg.ReadPage(nodeID)
+	if err != nil {
+		return false, fmt.Errorf("btree delete: read page %d: %w", nodeID, err)
+	}
+	switch PageNodeType(p) {
+	case NodeTypeLeaf:
+		leaf, err := DecodeLeaf(p)
+		if err != nil {
+			return false, fmt.Errorf("btree delete: decode leaf %d: %w", nodeID, err)
+		}
+		idx, found := LeafSearchKey(leaf.Entries, key)
+		if !found {
+			return false, nil
+		}
+		leaf.Entries = append(leaf.Entries[:idx], leaf.Entries[idx+1:]...)
+		encoded, err := EncodeLeaf(leaf)
+		if err != nil {
+			return false, fmt.Errorf("btree delete: encode leaf %d: %w", nodeID, err)
+		}
+		return true, bt.pg.WritePage(encoded)
+	case NodeTypeInternal:
+		internal, err := DecodeInternal(p)
+		if err != nil {
+			return false, fmt.Errorf("btree delete: decode internal %d: %w", nodeID, err)
+		}
+		childID := internal.Children[FindChildIndex(internal.Keys, key)]
+		return bt.deleteInNode(childID, key)
+	default:
+		return false, fmt.Errorf("btree delete: unknown node type in page %d", nodeID)
+	}
+}
+
 // --- recursive insert implementation ---
 
 // insertNode inserts key→value into the subtree rooted at nodeID.

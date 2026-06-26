@@ -125,6 +125,25 @@ type AnalyzeStmt struct {
 	TableName string
 }
 
+// Assignment is one SET clause entry: column = value.
+type Assignment struct {
+	Column string
+	Value  catalog.Value
+}
+
+// DeleteStmt represents: DELETE FROM table [WHERE ...]
+type DeleteStmt struct {
+	TableName string
+	Where     *WhereClause
+}
+
+// UpdateStmt represents: UPDATE table SET col=val [, col=val ...] [WHERE ...]
+type UpdateStmt struct {
+	TableName   string
+	Assignments []Assignment
+	Where       *WhereClause
+}
+
 // BeginStmt represents BEGIN — start an explicit transaction.
 type BeginStmt struct{}
 
@@ -141,6 +160,8 @@ func (*InsertStmt) stmtNode()      {}
 func (*SelectStmt) stmtNode()      {}
 func (*ExplainStmt) stmtNode()     {}
 func (*AnalyzeStmt) stmtNode()     {}
+func (*DeleteStmt) stmtNode()      {}
+func (*UpdateStmt) stmtNode()      {}
 func (*BeginStmt) stmtNode()       {}
 func (*CommitStmt) stmtNode()      {}
 func (*RollbackStmt) stmtNode()    {}

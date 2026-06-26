@@ -25,6 +25,7 @@ design decision in a real database engine exists, not just how to use one.
 | 11 | ✅ Done | JOIN — multi-table queries, nested-loop join, predicate pushdown |
 | 12 | ✅ Done | Concurrency — MVCC, multiple readers/writers |
 | 13 | ✅ Done | Network — TCP server, wire protocol |
+| 14 | ✅ Done | DML — DELETE and UPDATE |
 
 ---
 
@@ -379,27 +380,118 @@ LIMIT 10;
 
 ---
 
-## Planned phases
+### Phase 12 — Concurrency and MVCC
 
-### Phase 12 — Concurrency
+**Packages:** `mvcc/`, `executor/` (MVCC integration)
 
-Allows multiple goroutines (or later, connections) to read and write
-concurrently without corrupting each other's view of the data.
+Adds **Multi-Version Concurrency Control** so multiple goroutines can read and
+write concurrently without blocking each other or corrupting each other's view
+of the data.
 
-The natural approach here is **MVCC** (Multi-Version Concurrency Control): each
-write creates a new version of a row tagged with a transaction ID; readers see
-the newest committed version as of their transaction start time. PostgreSQL,
-MySQL InnoDB, and CockroachDB all use MVCC for this reason — it lets readers
-never block writers and vice versa.
+Key decisions:
+
+**Row versioning** — every row carries two hidden fields in its 128-byte B-Tree
+value slot:
+- `xmin` (4 bytes): XID of the transaction that inserted the row.
+- `xmax` (4 bytes): XID of the transaction that deleted the row (0 = live).
+
+**Snapshot isolation** — at the start of every read, the executor calls
+`TxManager.TakeSnapshot()`. A snapshot records the set of committed XIDs at
+that instant. `Snapshot.IsVisible(xmin, xmax)` returns true only when `xmin` is
+committed in the snapshot and `xmax` is either 0 or uncommitted. This gives
+readers a stable, point-in-time view; concurrent writers do not interfere.
+
+**No read locks** — readers never block writers. Each writer gets a fresh XID
+and writes new row versions; old versions remain visible to snapshots taken
+before the commit.
+
+**`TxManager`** serialises XID allocation (`AllocXID`) and committed-set updates
+(`MarkCommitted`). `TakeSnapshot` copies the committed set under a mutex —
+O(n) in the number of ever-committed transactions, negligible in practice.
+
+Concurrency test coverage:
+- Snapshot isolation under parallel inserts
+- Read-your-own-writes inside an explicit transaction
+- Concurrent writer goroutines — committed rows are all visible after `wg.Wait()`
 
 ---
 
 ### Phase 13 — Network protocol
 
-Turns the in-process `DB.Exec()` API into a TCP server that clients connect to
-over a socket. Includes a simple request/response wire protocol, connection
-handling, and a matching client library. This is the point where the project
-becomes a standalone server process rather than an embedded library.
+**Packages:** `server/`, `client/`, `cmd/dbserver`
+
+Turns the in-process `DB.Exec()` API into a TCP server that remote clients can
+query over a socket.
+
+**Wire protocol** — a simple length-prefixed request/response binary protocol:
+
+```
+Request:  Length(4) | SQLText(n)
+Response: Length(4) | StatusByte(1) | PayloadJSON(n)
+```
+
+`StatusByte = 0` means success; `1` means error. The payload is a JSON-encoded
+`Result` (rows + message) on success or an error string on failure.
+
+**Server** (`server/`) — accepts TCP connections, reads one request at a time
+per connection, calls `DB.Exec(sql)`, writes the response. Each connection runs
+in its own goroutine, sharing the same `*DB` instance (which is goroutine-safe
+after Phase 12).
+
+**Client** (`client/`) — `Connect(addr)` returns a `*Client` with a single
+`Exec(sql) (*Result, error)` method, mirroring the in-process API so callers
+can swap in a remote connection without changing application code.
+
+**`cmd/dbserver`** — CLI binary: `dbserver --dir <dir> --addr :5432`. Starts the
+TCP listener and blocks until interrupted.
+
+The web dashboard (`cmd/dashboard`) was also added in this phase: a small HTTP
+server that queries the db-engine TCP server and renders results in a browser.
+
+---
+
+### Phase 14 — DELETE and UPDATE
+
+**Package:** `executor/dml.go`, `btree/btree.go`
+
+Completes the DML set by adding `DELETE` and `UPDATE` alongside the existing
+`INSERT` and `SELECT`.
+
+**B-Tree leaf deletion** (`btree.Delete`) — walks the tree to the correct leaf
+and removes the entry by shifting the remaining entries left. No rebalancing;
+leaves may temporarily underflow. A future compaction pass can reclaim wasted
+space.
+
+**MVCC DELETE** — sets `xmax = current_xid` on the primary-row entry so
+snapshot readers with an earlier snapshot still see the row (non-destructive).
+Secondary index entries *are* physically removed via `btree.Delete` so a
+re-insert with the same indexed value succeeds immediately.
+
+**MVCC UPDATE** — overwrites the primary row in-place with new column values
+and `xmin = current_xid` (the old `xmax` stays 0, since there is only ever one
+live version per primary key). Secondary index entries for changed columns are
+updated: old key deleted, new key inserted.
+
+**Two-phase scan-then-modify** — the executor first collects all matching row
+PKs via a cursor scan (read phase), then applies mutations (write phase). This
+avoids cursor/write interference when the cursor is positioned on the same leaf
+being modified.
+
+**`idxBTProvider`** — lazily opens each secondary-index B-Tree at most once per
+operation and caches the handle for the duration of the mutation loop.
+
+Auto-commit and explicit-transaction paths are both supported. The existing
+`evalPreds`/`compareVals` helpers from `operators.go` are reused for WHERE
+clause evaluation in both paths.
+
+New SQL syntax:
+```sql
+DELETE FROM users WHERE id = 42;
+DELETE FROM users;                              -- deletes all rows
+
+UPDATE users SET age = 31 WHERE id = 1;
+UPDATE users SET score = 0, tag = 'reset';      -- multiple columns, no WHERE
+```
 
 ---
 

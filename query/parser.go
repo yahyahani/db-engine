@@ -76,6 +76,10 @@ func (p *parser) parseStatement() (Statement, error) {
 		return p.parseExplain()
 	case TokAnalyze:
 		return p.parseAnalyze()
+	case TokDelete:
+		return p.parseDelete()
+	case TokUpdate:
+		return p.parseUpdate()
 	case TokBegin:
 		p.consume()
 		return &BeginStmt{}, nil
@@ -86,7 +90,7 @@ func (p *parser) parseStatement() (Statement, error) {
 		p.consume()
 		return &RollbackStmt{}, nil
 	default:
-		return nil, fmt.Errorf("expected SELECT, INSERT, CREATE, DROP, EXPLAIN, BEGIN, COMMIT, or ROLLBACK — got %q", p.peek().Text)
+		return nil, fmt.Errorf("expected SELECT, INSERT, CREATE, DROP, EXPLAIN, DELETE, UPDATE, BEGIN, COMMIT, or ROLLBACK — got %q", p.peek().Text)
 	}
 }
 
@@ -515,4 +519,65 @@ func (p *parser) parseValue() (catalog.Value, error) {
 	default:
 		return catalog.Value{}, fmt.Errorf("expected integer or string literal, got %q", p.peek().Text)
 	}
+}
+
+// parseDelete parses: DELETE FROM table [WHERE ...]
+func (p *parser) parseDelete() (*DeleteStmt, error) {
+	p.consume() // DELETE
+	if _, err := p.expect(TokFrom); err != nil {
+		return nil, err
+	}
+	tbl, err := p.expect(TokIdent)
+	if err != nil {
+		return nil, fmt.Errorf("DELETE: expected table name: %w", err)
+	}
+	var where *WhereClause
+	if p.peek().Kind == TokWhere {
+		p.consume()
+		where, err = p.parseWhere()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &DeleteStmt{TableName: tbl.Text, Where: where}, nil
+}
+
+// parseUpdate parses: UPDATE table SET col=val [, col=val ...] [WHERE ...]
+func (p *parser) parseUpdate() (*UpdateStmt, error) {
+	p.consume() // UPDATE
+	tbl, err := p.expect(TokIdent)
+	if err != nil {
+		return nil, fmt.Errorf("UPDATE: expected table name: %w", err)
+	}
+	if _, err := p.expect(TokSet); err != nil {
+		return nil, err
+	}
+	var assignments []Assignment
+	for {
+		col, err := p.expect(TokIdent)
+		if err != nil {
+			return nil, fmt.Errorf("UPDATE SET: expected column name: %w", err)
+		}
+		if _, err := p.expect(TokEq); err != nil {
+			return nil, err
+		}
+		val, err := p.parseValue()
+		if err != nil {
+			return nil, fmt.Errorf("UPDATE SET: %w", err)
+		}
+		assignments = append(assignments, Assignment{Column: col.Text, Value: val})
+		if p.peek().Kind != TokComma {
+			break
+		}
+		p.consume() // ,
+	}
+	var where *WhereClause
+	if p.peek().Kind == TokWhere {
+		p.consume()
+		where, err = p.parseWhere()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &UpdateStmt{TableName: tbl.Text, Assignments: assignments, Where: where}, nil
 }

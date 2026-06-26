@@ -272,6 +272,10 @@ func (db *DB) Exec(sql string) (*Result, error) {
 		return db.execRollback()
 	case *query.InsertStmt:
 		return db.execInsert(s)
+	case *query.DeleteStmt:
+		return db.execDelete(s)
+	case *query.UpdateStmt:
+		return db.execUpdate(s)
 	case *query.CreateTableStmt:
 		db.mu.Lock()
 		defer db.mu.Unlock()

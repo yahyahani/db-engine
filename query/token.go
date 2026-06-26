@@ -32,6 +32,9 @@ const (
 	TokJoin    // JOIN
 	TokInner   // INNER  (INNER JOIN)
 	TokAs      // AS     (table alias)
+	TokDelete  // DELETE
+	TokUpdate  // UPDATE
+	TokSet     // SET
 
 	// Literals
 	TokIdent  // unquoted identifier: table name, column name
