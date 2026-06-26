@@ -150,8 +150,11 @@ func TestParseSelectStar(t *testing.T) {
 		t.Fatalf("Parse: %v", err)
 	}
 	sel := stmt.(*SelectStmt)
-	if sel.TableName != "products" || len(sel.Columns) != 1 || sel.Columns[0] != "*" {
-		t.Errorf("unexpected: %+v", sel)
+	if len(sel.From) != 1 || sel.From[0].Name != "products" {
+		t.Errorf("From: got %+v, want [{Name:products}]", sel.From)
+	}
+	if len(sel.Columns) != 1 || sel.Columns[0] != "*" {
+		t.Errorf("Columns: %+v", sel.Columns)
 	}
 	if sel.Where != nil {
 		t.Error("expected no WHERE clause")
@@ -266,5 +269,87 @@ func TestParseErrorMissingTableName(t *testing.T) {
 func TestParseErrorMissingFrom(t *testing.T) {
 	if _, err := Parse("SELECT * users"); err == nil {
 		t.Error("expected error for missing FROM")
+	}
+}
+
+// --- Phase 11: JOIN / multi-table parser tests ---
+
+func TestParseFromTwoTablesImplicit(t *testing.T) {
+	stmt, err := Parse("SELECT * FROM users, orders")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	sel := stmt.(*SelectStmt)
+	if len(sel.From) != 2 {
+		t.Fatalf("From: got %d tables, want 2", len(sel.From))
+	}
+	if sel.From[0].Name != "users" || sel.From[1].Name != "orders" {
+		t.Errorf("From names: %v", sel.From)
+	}
+}
+
+func TestParseTableAlias(t *testing.T) {
+	stmt, err := Parse("SELECT * FROM users AS u")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	sel := stmt.(*SelectStmt)
+	if sel.From[0].Name != "users" || sel.From[0].Alias != "u" {
+		t.Errorf("From[0]: got %+v, want {Name:users Alias:u}", sel.From[0])
+	}
+}
+
+func TestParseQualifiedColumn(t *testing.T) {
+	stmt, err := Parse("SELECT u.id, u.name FROM users AS u")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	sel := stmt.(*SelectStmt)
+	if len(sel.Columns) != 2 || sel.Columns[0] != "u.id" || sel.Columns[1] != "u.name" {
+		t.Errorf("Columns: %v", sel.Columns)
+	}
+}
+
+func TestParseExplicitJoin(t *testing.T) {
+	stmt, err := Parse("SELECT * FROM users AS u JOIN orders AS o ON u.id = o.user_id")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	sel := stmt.(*SelectStmt)
+	if len(sel.From) != 1 || sel.From[0].Name != "users" {
+		t.Errorf("From: %+v", sel.From)
+	}
+	if len(sel.Joins) != 1 {
+		t.Fatalf("Joins: got %d, want 1", len(sel.Joins))
+	}
+	j := sel.Joins[0]
+	if j.Table.Name != "orders" || j.Table.Alias != "o" {
+		t.Errorf("join table: %+v", j.Table)
+	}
+	if j.On.Column != "u.id" || j.On.RHSCol != "o.user_id" {
+		t.Errorf("join ON: %+v", j.On)
+	}
+}
+
+func TestParseJoinConditionIsJoinCond(t *testing.T) {
+	stmt, err := Parse("SELECT * FROM a JOIN b ON a.x = b.y")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	sel := stmt.(*SelectStmt)
+	if !sel.Joins[0].On.IsJoinCond() {
+		t.Error("ON a.x = b.y should be a join condition")
+	}
+}
+
+func TestParseWhereFilterIsNotJoinCond(t *testing.T) {
+	stmt, err := Parse("SELECT * FROM users WHERE id = 5")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	sel := stmt.(*SelectStmt)
+	c := sel.Where.Groups[0][0]
+	if c.IsJoinCond() {
+		t.Error("id = 5 should not be a join condition")
 	}
 }

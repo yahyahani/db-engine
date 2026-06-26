@@ -17,12 +17,22 @@ func (op CompareOp) String() string {
 	return [...]string{"=", ">", "<", ">=", "<="}[op]
 }
 
-// Condition is one predicate in a WHERE clause: <column> <op> <value>.
+// Condition is one predicate in a WHERE or JOIN ON clause.
+//
+// Two forms:
+//   - Filter predicate: Column op Val    (RHSCol == "")
+//   - Join predicate:   Column op RHSCol (RHSCol != "")
+//
+// Column and RHSCol may be qualified ("alias.col") or bare ("col").
 type Condition struct {
 	Column string
 	Op     CompareOp
-	Val    catalog.Value
+	Val    catalog.Value // right operand when RHSCol == ""
+	RHSCol string        // right operand when non-empty (join condition)
 }
+
+// IsJoinCond reports whether this is a column-to-column join condition.
+func (c Condition) IsJoinCond() bool { return c.RHSCol != "" }
 
 // WhereClause is a boolean formula in Disjunctive Normal Form (OR of ANDs).
 //
@@ -30,14 +40,32 @@ type Condition struct {
 // Groups themselves are OR-combined at the top level.
 //
 // Examples:
-//   WHERE a=1 AND b=2        →  Groups: [[a=1, b=2]]
-//   WHERE a=1 OR  a=5        →  Groups: [[a=1], [a=5]]
-//   WHERE a>0 AND b=1 OR c=3 →  Groups: [[a>0, b=1], [c=3]]  (AND binds tighter)
 //
-// A single-group WhereClause is equivalent to the old AND-only form; all
-// existing code paths that previously used where.Conds now use where.Groups[0].
+//	WHERE a=1 AND b=2        →  Groups: [[a=1, b=2]]
+//	WHERE a=1 OR  a=5        →  Groups: [[a=1], [a=5]]
+//	WHERE a>0 AND b=1 OR c=3 →  Groups: [[a>0, b=1], [c=3]]  (AND binds tighter)
 type WhereClause struct {
 	Groups [][]Condition // outer = OR, inner = AND
+}
+
+// TableRef is one table source in a FROM clause, with an optional alias.
+type TableRef struct {
+	Name  string // catalog table name
+	Alias string // query alias (empty = use Name)
+}
+
+// Qualifier returns the name by which this table is referenced in the query.
+func (t TableRef) Qualifier() string {
+	if t.Alias != "" {
+		return t.Alias
+	}
+	return t.Name
+}
+
+// JoinClause is one explicit JOIN in the FROM clause.
+type JoinClause struct {
+	Table TableRef
+	On    Condition // must satisfy On.IsJoinCond() == true
 }
 
 // Statement is implemented by all supported SQL statement types.
@@ -55,16 +83,19 @@ type InsertStmt struct {
 	Values    []catalog.Value
 }
 
-// SelectStmt represents: SELECT cols FROM name [WHERE ...] [LIMIT n]
+// SelectStmt represents: SELECT cols FROM table [JOIN ...] [WHERE ...] [LIMIT n]
 //
-// Columns is ["*"] for SELECT *, or a list of column names.
+// From contains at least one TableRef.
+// Joins holds explicit JOIN clauses; implicit cross-joins use From with multiple entries.
+// Columns is ["*"] for SELECT *, or a list of (possibly qualified) column names.
 // Where is nil if there is no WHERE clause.
 // Limit is 0 (no limit) or a positive row count.
 type SelectStmt struct {
-	TableName string
-	Columns   []string
-	Where     *WhereClause
-	Limit     int
+	Columns []string
+	From    []TableRef
+	Joins   []JoinClause
+	Where   *WhereClause
+	Limit   int
 }
 
 // ExplainStmt represents: EXPLAIN SELECT ...
@@ -77,8 +108,7 @@ type ExplainStmt struct {
 //
 // Only INT columns may be indexed (B-Tree key is uint64).
 // The index is always unique: two rows with the same indexed value will cause
-// the second INSERT to fail.  Non-unique indexes require a composite B-Tree key
-// and are deferred to a future phase.
+// the second INSERT to fail.
 type CreateIndexStmt struct {
 	IndexName string
 	TableName string
@@ -91,10 +121,6 @@ type DropIndexStmt struct {
 }
 
 // AnalyzeStmt represents: ANALYZE tablename
-//
-// Triggers a full table scan to collect per-column statistics (row count,
-// distinct values, min/max for INT columns).  Results are persisted to
-// <dir>/stats and used by the planner on subsequent queries.
 type AnalyzeStmt struct {
 	TableName string
 }

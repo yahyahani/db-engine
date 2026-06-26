@@ -6,20 +6,16 @@ package executor
 // Operator that emits one row at a time through Next().  The executor
 // drives the iterator by calling Next() in a loop until it returns false.
 //
-// Why the Volcano model?
-//   Pipelining: a LIMIT node stops pulling from its child the moment it has
-//   enough rows.  With the old "collect-all-then-truncate" approach the scan
-//   had to read the full table even for LIMIT 1.  The Volcano model makes
-//   short-circuit evaluation natural and free.
-//
 // Row representation:
-//   []catalog.Value — one element per column in the table's declaration order.
-//   The Project operator selects and reorders columns before emitting to the
+//   []catalog.Value — one element per column in declaration order.
+//   For join results, left-table columns come first, then right-table columns.
+//   The Project operator selects and reorders columns before returning to the
 //   caller, so the output schema always matches the SELECT column list.
 
 import (
 	"encoding/binary"
 	"fmt"
+	"strings"
 
 	"github.com/yahya/db-engine/btree"
 	"github.com/yahya/db-engine/catalog"
@@ -29,68 +25,114 @@ import (
 )
 
 // Operator is the Volcano iterator interface.
-// Every physical plan node is executed as an Operator.
 type Operator interface {
-	// Open initialises the operator and all of its children.
-	// Must be called before the first Next().
 	Open() error
 	// Next returns the next row and true, or (nil, false, nil) when exhausted.
 	// An error during row production is returned as the third value.
 	Next() ([]catalog.Value, bool, error)
-	// Close releases resources held by the operator and its children.
 	Close() error
 }
 
 // buildOp converts a physical plan node into an executable Operator.
-//   ps  — PageStore for the primary table (BufPager or TxPager)
-//   db  — needed for IndexLookup to open the secondary index PageStore
-//   tbl — table schema
-func buildOp(node planner.PhysicalNode, ps pager.PageStore, db *DB, tbl *catalog.Table) (Operator, error) {
+// It uses db to open PageStores so no ps/tbl arguments are needed.
+func buildOp(node planner.PhysicalNode, db *DB) (Operator, error) {
 	switch n := node.(type) {
 	case *planner.IndexScan:
-		return &scanOp{node: n, ps: ps, tbl: tbl}, nil
+		ps, err := db.pageStoreFor(n.Table.Name)
+		if err != nil {
+			return nil, fmt.Errorf("open table %q: %w", n.Table.Name, err)
+		}
+		return &scanOp{node: n, ps: ps, tbl: n.Table}, nil
+
 	case *planner.IndexLookup:
+		ps, err := db.pageStoreFor(n.Table.Name)
+		if err != nil {
+			return nil, fmt.Errorf("open table %q: %w", n.Table.Name, err)
+		}
 		idxPS, err := db.getOrOpenIndex(n.Index.Name)
 		if err != nil {
 			return nil, fmt.Errorf("open secondary index %q: %w", n.Index.Name, err)
 		}
-		return &indexLookupOp{node: n, ps: ps, idxPS: idxPS, tbl: tbl}, nil
+		return &indexLookupOp{node: n, ps: ps, idxPS: idxPS, tbl: n.Table}, nil
+
 	case *planner.Filter:
-		child, err := buildOp(n.Child, ps, db, tbl)
+		child, err := buildOp(n.Child, db)
 		if err != nil {
 			return nil, err
 		}
+		tbl := baseTable(n.Child) // nil-safe; nil = no tbl.ColIndex fallback
 		return &filterOp{child: child, preds: n.Preds, tbl: tbl}, nil
+
 	case *planner.Limit:
-		child, err := buildOp(n.Child, ps, db, tbl)
+		child, err := buildOp(n.Child, db)
 		if err != nil {
 			return nil, err
 		}
 		return &limitOp{child: child, n: n.N}, nil
+
 	case *planner.Project:
-		child, err := buildOp(n.Child, ps, db, tbl)
+		child, err := buildOp(n.Child, db)
 		if err != nil {
 			return nil, err
 		}
 		return &projectOp{child: child, colIdxs: n.ColIdxs}, nil
+
 	case *planner.Union:
 		children := make([]Operator, len(n.Children))
 		for i, child := range n.Children {
-			op, err := buildOp(child, ps, db, tbl)
+			op, err := buildOp(child, db)
 			if err != nil {
 				return nil, err
 			}
 			children[i] = op
 		}
 		return &unionOp{children: children, pkIdx: n.PkIdx}, nil
+
+	case *planner.NestedLoopJoin:
+		left, err := buildOp(n.Left, db)
+		if err != nil {
+			return nil, err
+		}
+		right, err := buildOp(n.Right, db)
+		if err != nil {
+			return nil, err
+		}
+		return &nlJoinOp{
+			left:        left,
+			right:       right,
+			on:          n.On,
+			leftSchema:  n.LeftSchema,
+			rightSchema: n.RightSchema,
+		}, nil
+
 	default:
 		return nil, fmt.Errorf("executor: unknown plan node %T", node)
 	}
 }
 
+// baseTable walks down a plan tree to find the leaf scan's catalog.Table.
+// Returns nil if there is no single base table (e.g. under a NestedLoopJoin).
+func baseTable(node planner.PhysicalNode) *catalog.Table {
+	switch n := node.(type) {
+	case *planner.IndexScan:
+		return n.Table
+	case *planner.IndexLookup:
+		return n.Table
+	case *planner.Filter:
+		return baseTable(n.Child)
+	case *planner.Limit:
+		return baseTable(n.Child)
+	case *planner.Union:
+		if len(n.Children) > 0 {
+			return baseTable(n.Children[0])
+		}
+	}
+	return nil
+}
+
 // execute runs a plan to completion and returns all result rows.
-func execute(plan planner.PhysicalNode, ps pager.PageStore, db *DB, tbl *catalog.Table) ([][]catalog.Value, error) {
-	op, err := buildOp(plan, ps, db, tbl)
+func execute(plan planner.PhysicalNode, db *DB) ([][]catalog.Value, error) {
+	op, err := buildOp(plan, db)
 	if err != nil {
 		return nil, err
 	}
@@ -116,12 +158,6 @@ func execute(plan planner.PhysicalNode, ps pager.PageStore, db *DB, tbl *catalog
 // --- scanOp ---
 
 // scanOp reads rows lazily from the B-Tree using a Cursor.
-//
-// Why a cursor instead of bulk RangeScan (as in Phase 6)?
-//   A cursor reads one leaf page at a time and stops the instant the caller
-//   stops calling Next().  For LIMIT 3 on a million-row table, only
-//   O(log n + 3) pages are ever loaded instead of all million rows.
-//   The cursor is opened in Open() and followed in each Next() call.
 type scanOp struct {
 	node   *planner.IndexScan
 	ps     pager.PageStore
@@ -130,7 +166,7 @@ type scanOp struct {
 }
 
 func (s *scanOp) Open() error {
-	bt, err := btree.Open(s.ps, 1) // header page is always page 1
+	bt, err := btree.Open(s.ps, 1)
 	if err != nil {
 		return fmt.Errorf("scanOp: open B-Tree: %w", err)
 	}
@@ -158,28 +194,16 @@ func (s *scanOp) Close() error {
 
 // --- indexLookupOp ---
 
-// indexLookupOp implements secondary-index-driven row retrieval.
-//
-// It maintains two B-Tree cursors:
-//   - A cursor on the secondary index B-Tree, scanning [MinKey, MaxKey] on the
-//     indexed column.  Each entry yields (indexed_value, pk_bytes).
-//   - For each PK found, a point lookup on the primary B-Tree returns the full
-//     encoded row.
-//
-// Value encoding in the secondary index:
-//   The 64-byte B-Tree value slot stores the primary key in the first 8 bytes
-//   (LittleEndian uint64); the remaining 56 bytes are unused.
 type indexLookupOp struct {
 	node    *planner.IndexLookup
-	ps      pager.PageStore // primary table PageStore
-	idxPS   pager.PageStore // secondary index PageStore
+	ps      pager.PageStore
+	idxPS   pager.PageStore
 	tbl     *catalog.Table
-	cursor  *btree.Cursor // cursor on secondary index
-	primary *btree.BTree  // primary B-Tree for PK point lookups
+	cursor  *btree.Cursor
+	primary *btree.BTree
 }
 
 func (op *indexLookupOp) Open() error {
-	// Open secondary index B-Tree and position cursor at minKey.
 	idxBT, err := btree.Open(op.idxPS, 1)
 	if err != nil {
 		return fmt.Errorf("indexLookupOp: open secondary index: %w", err)
@@ -188,7 +212,6 @@ func (op *indexLookupOp) Open() error {
 	if err != nil {
 		return fmt.Errorf("indexLookupOp: cursor: %w", err)
 	}
-	// Open primary B-Tree for PK lookups.
 	op.primary, err = btree.Open(op.ps, 1)
 	if err != nil {
 		return fmt.Errorf("indexLookupOp: open primary: %w", err)
@@ -202,15 +225,12 @@ func (op *indexLookupOp) Next() ([]catalog.Value, bool, error) {
 		if !ok || err != nil {
 			return nil, ok, err
 		}
-		// Extract PK from the first 8 bytes of the secondary index value slot.
 		pk := binary.LittleEndian.Uint64(idxEntry.Value[:8])
 		val, found, err := op.primary.Search(pk)
 		if err != nil {
 			return nil, false, fmt.Errorf("indexLookupOp: primary lookup pk=%d: %w", pk, err)
 		}
 		if !found {
-			// The index entry points to a non-existent PK — index is inconsistent.
-			// Skip rather than error so a partial index doesn't block all queries.
 			continue
 		}
 		return decodeRow(op.tbl, val), true, nil
@@ -226,22 +246,10 @@ func (op *indexLookupOp) Close() error {
 
 // --- unionOp ---
 
-// unionOp merges the row streams from multiple child operators, emitting each
-// unique primary-key row exactly once.
-//
-// Why deduplication is necessary:
-//   With OR conditions such as "id > 10 OR name='Alice'", a row with id=11
-//   AND name='Alice' matches both branches.  Without the seen map it would
-//   appear twice in the output.  The seen map tracks uint64 PK values, which
-//   is cheap: one map lookup and one write per row.
-//
-// Ordering: rows are emitted in the order they appear across children (branch
-// 0 first, then branch 1, etc.).  Within one branch, rows are in B-Tree key
-// order (ascending PK).
 type unionOp struct {
 	children []Operator
-	pkIdx    int         // column index of the primary key in the full row
-	cur      int         // index of the child currently being drained
+	pkIdx    int
+	cur      int
 	seen     map[uint64]bool
 }
 
@@ -268,7 +276,7 @@ func (u *unionOp) Next() ([]catalog.Value, bool, error) {
 		}
 		pk := row[u.pkIdx].IntVal
 		if u.seen[pk] {
-			continue // duplicate — skip and pull from the same child again
+			continue
 		}
 		u.seen[pk] = true
 		return row, true, nil
@@ -289,12 +297,11 @@ func (u *unionOp) Close() error {
 // --- filterOp ---
 
 // filterOp wraps a child operator and discards rows that do not satisfy all
-// predicates.  It loops internally until it finds a matching row or the child
-// is exhausted — from the parent's perspective, every row returned is valid.
+// predicates.
 type filterOp struct {
 	child Operator
 	preds []query.Condition
-	tbl   *catalog.Table
+	tbl   *catalog.Table // non-nil for single-table filters (uses tbl.ColIndex)
 }
 
 func (f *filterOp) Open() error { return f.child.Open() }
@@ -315,9 +322,6 @@ func (f *filterOp) Close() error { return f.child.Close() }
 
 // --- limitOp ---
 
-// limitOp stops emitting rows after n have been produced.  The child is NOT
-// exhausted — it is simply not called again.  This is the key advantage of the
-// Volcano model: resources downstream of a LIMIT are released early.
 type limitOp struct {
 	child Operator
 	n     int
@@ -341,9 +345,6 @@ func (l *limitOp) Close() error { return l.child.Close() }
 
 // --- projectOp ---
 
-// projectOp selects a subset of columns from each row and reorders them to
-// match the SELECT column list.  It is always the root operator because it
-// shapes the output schema.
 type projectOp struct {
 	child   Operator
 	colIdxs []int
@@ -365,12 +366,189 @@ func (p *projectOp) Next() ([]catalog.Value, bool, error) {
 
 func (p *projectOp) Close() error { return p.child.Close() }
 
+// --- nlJoinOp ---
+
+// nlJoinOp implements the nested-loop join: for each row from the left child,
+// it re-scans the entire right child and emits pairs that satisfy On.
+//
+// Re-scanning the right child every time is correct because the right operator
+// is re-Opened for each left row.  This is O(|left| × |right|) I/Os; a
+// hash join (Phase 12) would reduce it to O(|left| + |right|).
+type nlJoinOp struct {
+	left, right Operator
+	on          []query.Condition
+	leftSchema  []string
+	rightSchema []string
+
+	// resolved at Open():
+	leftColMap  map[string]int
+	rightColMap map[string]int
+
+	// state during iteration:
+	leftRow   []catalog.Value
+	rightOpen bool // true when right child is currently open for current leftRow
+}
+
+func (j *nlJoinOp) Open() error {
+	j.leftColMap = buildColMap(j.leftSchema)
+	j.rightColMap = buildColMap(j.rightSchema)
+	j.rightOpen = false
+	return j.left.Open()
+}
+
+func (j *nlJoinOp) Next() ([]catalog.Value, bool, error) {
+	for {
+		// Advance the left side when the right side is exhausted (or not yet started).
+		if !j.rightOpen {
+			row, ok, err := j.left.Next()
+			if !ok || err != nil {
+				return nil, ok, err
+			}
+			j.leftRow = row
+			// Re-open the right child for this new left row.
+			_ = j.right.Close()
+			if err := j.right.Open(); err != nil {
+				return nil, false, fmt.Errorf("nlJoinOp: reopen right: %w", err)
+			}
+			j.rightOpen = true
+		}
+
+		rightRow, ok, err := j.right.Next()
+		if err != nil {
+			return nil, false, err
+		}
+		if !ok {
+			j.rightOpen = false
+			continue
+		}
+
+		if !j.evalOn(j.leftRow, rightRow) {
+			continue
+		}
+
+		combined := make([]catalog.Value, len(j.leftRow)+len(rightRow))
+		copy(combined, j.leftRow)
+		copy(combined[len(j.leftRow):], rightRow)
+		return combined, true, nil
+	}
+}
+
+func (j *nlJoinOp) Close() error {
+	if j.rightOpen {
+		_ = j.right.Close()
+		j.rightOpen = false
+	}
+	return j.left.Close()
+}
+
+// evalOn returns true iff all join conditions hold for (leftRow, rightRow).
+func (j *nlJoinOp) evalOn(left, right []catalog.Value) bool {
+	for _, cond := range j.on {
+		lIdx := resolveInMap(cond.Column, j.leftColMap)
+		rIdx := resolveInMap(cond.RHSCol, j.rightColMap)
+		if lIdx < 0 || rIdx < 0 {
+			// Try swapped (condition may be written right-to-left).
+			lIdx2 := resolveInMap(cond.Column, j.rightColMap)
+			rIdx2 := resolveInMap(cond.RHSCol, j.leftColMap)
+			if lIdx2 < 0 || rIdx2 < 0 {
+				continue // unresolved — skip (planner should have caught this)
+			}
+			if !compareVals(right[lIdx2], left[rIdx2], cond.Op) {
+				return false
+			}
+			continue
+		}
+		if !compareVals(left[lIdx], right[rIdx], cond.Op) {
+			return false
+		}
+	}
+	return true
+}
+
+// buildColMap creates a map from column name → row index for fast resolution.
+// It registers both the qualified name ("alias.col") and the bare name ("col"),
+// with the qualified name taking precedence on conflicts.
+func buildColMap(schema []string) map[string]int {
+	m := make(map[string]int, len(schema)*2)
+	// First pass: bare names (lower priority).
+	for i, s := range schema {
+		if dot := strings.LastIndexByte(s, '.'); dot >= 0 {
+			bare := strings.ToLower(s[dot+1:])
+			if _, exists := m[bare]; !exists {
+				m[bare] = i
+			}
+		}
+	}
+	// Second pass: qualified names (higher priority — overwrite if needed).
+	for i, s := range schema {
+		m[strings.ToLower(s)] = i
+	}
+	return m
+}
+
+// resolveInMap resolves a column reference (qualified or bare) against a colMap.
+func resolveInMap(name string, m map[string]int) int {
+	if idx, ok := m[strings.ToLower(name)]; ok {
+		return idx
+	}
+	// Try bare suffix.
+	if dot := strings.LastIndexByte(name, '.'); dot >= 0 {
+		if idx, ok := m[strings.ToLower(name[dot+1:])]; ok {
+			return idx
+		}
+	}
+	return -1
+}
+
+// compareVals compares two catalog.Values using op.
+func compareVals(a, b catalog.Value, op query.CompareOp) bool {
+	if a.Type != b.Type {
+		return false
+	}
+	switch a.Type {
+	case catalog.TypeInt:
+		switch op {
+		case query.OpEq:
+			return a.IntVal == b.IntVal
+		case query.OpGt:
+			return a.IntVal > b.IntVal
+		case query.OpLt:
+			return a.IntVal < b.IntVal
+		case query.OpGte:
+			return a.IntVal >= b.IntVal
+		case query.OpLte:
+			return a.IntVal <= b.IntVal
+		}
+	case catalog.TypeText:
+		switch op {
+		case query.OpEq:
+			return a.TextVal == b.TextVal
+		case query.OpGt:
+			return a.TextVal > b.TextVal
+		case query.OpLt:
+			return a.TextVal < b.TextVal
+		case query.OpGte:
+			return a.TextVal >= b.TextVal
+		case query.OpLte:
+			return a.TextVal <= b.TextVal
+		}
+	}
+	return false
+}
+
 // --- predicate evaluation ---
 
-// evalPreds returns true iff every predicate in preds holds for row.
 func evalPreds(row []catalog.Value, tbl *catalog.Table, preds []query.Condition) bool {
 	for _, cond := range preds {
-		idx := tbl.ColIndex(cond.Column)
+		if cond.IsJoinCond() {
+			continue // join conditions are handled by nlJoinOp, not filterOp
+		}
+		var idx int
+		if tbl != nil {
+			idx = tbl.ColIndex(cond.Column)
+		} else {
+			idx = -1
+		}
 		if idx < 0 {
 			continue
 		}
@@ -382,37 +560,5 @@ func evalPreds(row []catalog.Value, tbl *catalog.Table, preds []query.Condition)
 }
 
 func evalCond(v catalog.Value, cond query.Condition) bool {
-	c := cond.Val
-	if v.Type != c.Type {
-		return false
-	}
-	switch v.Type {
-	case catalog.TypeInt:
-		switch cond.Op {
-		case query.OpEq:
-			return v.IntVal == c.IntVal
-		case query.OpGt:
-			return v.IntVal > c.IntVal
-		case query.OpLt:
-			return v.IntVal < c.IntVal
-		case query.OpGte:
-			return v.IntVal >= c.IntVal
-		case query.OpLte:
-			return v.IntVal <= c.IntVal
-		}
-	case catalog.TypeText:
-		switch cond.Op {
-		case query.OpEq:
-			return v.TextVal == c.TextVal
-		case query.OpGt:
-			return v.TextVal > c.TextVal
-		case query.OpLt:
-			return v.TextVal < c.TextVal
-		case query.OpGte:
-			return v.TextVal >= c.TextVal
-		case query.OpLte:
-			return v.TextVal <= c.TextVal
-		}
-	}
-	return false
+	return compareVals(v, cond.Val, cond.Op)
 }

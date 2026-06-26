@@ -126,6 +126,25 @@ type Union struct {
 	PkIdx    int
 }
 
+// NestedLoopJoin joins two child plans using the classic nested-loop algorithm:
+// for each row from Left, scan all rows from Right and emit pairs that satisfy
+// all On conditions.
+//
+// Why nested-loop for Phase 11?
+//   It is correct for any join condition and requires no auxiliary data
+//   structures.  The trade-off is O(|left| × |right|) I/Os.  A hash join
+//   (Phase 12) reduces this to O(|left| + |right|) for equality conditions.
+//
+// LeftSchema and RightSchema are the qualified column-name lists for the left
+// and right sides (e.g. "u.id", "u.name", "o.amount").  The executor uses
+// them to resolve column names in On conditions without scanning the catalog.
+type NestedLoopJoin struct {
+	Left, Right PhysicalNode
+	On          []query.Condition // join predicates; all must satisfy IsJoinCond()
+	LeftSchema  []string          // qualified column names of the left side
+	RightSchema []string          // qualified column names of the right side
+}
+
 // --- EXPLAIN ---
 
 // Explain returns a human-readable representation of the plan tree, one line
@@ -156,7 +175,11 @@ func (s *IndexScan) explainLines(depth int, lines *[]string) {
 func (f *Filter) explainLines(depth int, lines *[]string) {
 	parts := make([]string, len(f.Preds))
 	for i, p := range f.Preds {
-		parts[i] = fmt.Sprintf("%s %s %s", p.Column, p.Op, p.Val.String())
+		if p.IsJoinCond() {
+			parts[i] = fmt.Sprintf("%s %s %s", p.Column, p.Op, p.RHSCol)
+		} else {
+			parts[i] = fmt.Sprintf("%s %s %s", p.Column, p.Op, p.Val.String())
+		}
 	}
 	*lines = append(*lines, indent(depth)+"Filter  ["+strings.Join(parts, ", ")+"]")
 	f.Child.explainLines(depth+1, lines)
@@ -193,6 +216,20 @@ func (u *Union) explainLines(depth int, lines *[]string) {
 	for _, child := range u.Children {
 		child.explainLines(depth+1, lines)
 	}
+}
+
+func (j *NestedLoopJoin) explainLines(depth int, lines *[]string) {
+	parts := make([]string, len(j.On))
+	for i, c := range j.On {
+		parts[i] = fmt.Sprintf("%s %s %s", c.Column, c.Op, c.RHSCol)
+	}
+	on := strings.Join(parts, ", ")
+	if on == "" {
+		on = "cross"
+	}
+	*lines = append(*lines, fmt.Sprintf("%sNestedLoopJoin  on=[%s]", indent(depth), on))
+	j.Left.explainLines(depth+1, lines)
+	j.Right.explainLines(depth+1, lines)
 }
 
 func indent(depth int) string { return strings.Repeat("  ", depth) }

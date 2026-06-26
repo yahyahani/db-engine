@@ -29,6 +29,9 @@ const (
 	TokOn      // ON
 	TokDrop    // DROP
 	TokAnalyze // ANALYZE
+	TokJoin    // JOIN
+	TokInner   // INNER  (INNER JOIN)
+	TokAs      // AS     (table alias)
 
 	// Literals
 	TokIdent  // unquoted identifier: table name, column name
@@ -48,6 +51,7 @@ const (
 	TokLParen // (
 	TokRParen // )
 	TokSemi   // ;
+	TokDot    // .  (qualified name separator: table.column)
 
 	TokEOF
 )

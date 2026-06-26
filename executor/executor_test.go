@@ -963,3 +963,128 @@ func TestAnalyzeResultsAreUsedInSelect(t *testing.T) {
 		t.Fatalf("after ANALYZE: expected row id=42, got %v", res.Rows)
 	}
 }
+
+// --- Phase 11: JOIN end-to-end tests ---
+
+// setupJoinTables creates users and orders tables and inserts test data.
+// users: (1,"Alice",30), (2,"Bob",25), (3,"Carol",35)
+// orders: (1,1,100), (2,1,200), (3,2,50)   — user_id references users.id
+func setupJoinTables(t *testing.T, db *DB) {
+	t.Helper()
+	mustExec(t, db, "CREATE TABLE users (id INT, name TEXT, age INT)")
+	mustExec(t, db, "CREATE TABLE orders (id INT, user_id INT, amount INT)")
+	mustExec(t, db, "INSERT INTO users VALUES (1, 'Alice', 30)")
+	mustExec(t, db, "INSERT INTO users VALUES (2, 'Bob', 25)")
+	mustExec(t, db, "INSERT INTO users VALUES (3, 'Carol', 35)")
+	mustExec(t, db, "INSERT INTO orders VALUES (1, 1, 100)")
+	mustExec(t, db, "INSERT INTO orders VALUES (2, 1, 200)")
+	mustExec(t, db, "INSERT INTO orders VALUES (3, 2, 50)")
+}
+
+// TestJoinExplicitReturnsCorrectRows verifies that an explicit JOIN ON
+// returns exactly the matching cross-product rows.
+func TestJoinExplicitReturnsCorrectRows(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+	setupJoinTables(t, db)
+
+	res := mustExec(t, db,
+		"SELECT u.id, o.amount FROM users AS u JOIN orders AS o ON u.id = o.user_id")
+	// Alice (id=1) has 2 orders (100, 200); Bob (id=2) has 1 order (50); Carol has none.
+	if len(res.Rows) != 3 {
+		t.Fatalf("expected 3 join rows, got %d: %v", len(res.Rows), res.Rows)
+	}
+	// Collect (user_id, amount) pairs
+	type pair struct{ uid, amt int }
+	var got []pair
+	for _, row := range res.Rows {
+		got = append(got, pair{int(row[0].IntVal), int(row[1].IntVal)})
+	}
+	want := []pair{{1, 100}, {1, 200}, {2, 50}}
+	for _, w := range want {
+		found := false
+		for _, g := range got {
+			if g == w {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing pair %+v in result %v", w, got)
+		}
+	}
+}
+
+// TestJoinImplicitSyntaxReturnsCorrectRows verifies that FROM t1, t2 WHERE t1.id = t2.fk
+// gives the same result as an explicit JOIN.
+func TestJoinImplicitSyntaxReturnsCorrectRows(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+	setupJoinTables(t, db)
+
+	res := mustExec(t, db,
+		"SELECT u.id, o.amount FROM users AS u, orders AS o WHERE u.id = o.user_id")
+	if len(res.Rows) != 3 {
+		t.Fatalf("expected 3 join rows, got %d: %v", len(res.Rows), res.Rows)
+	}
+}
+
+// TestJoinWithFilterPushdown verifies that a filter on a single table
+// is pushed down and reduces the join result correctly.
+func TestJoinWithFilterPushdown(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+	setupJoinTables(t, db)
+
+	// Only users with age > 25 (Alice=30, Carol=35). Carol has no orders.
+	res := mustExec(t, db,
+		"SELECT u.id, o.amount FROM users AS u JOIN orders AS o ON u.id = o.user_id WHERE u.age > 25")
+	// Alice (age=30, id=1) has 2 orders; Carol (age=35, id=3) has 0 orders.
+	if len(res.Rows) != 2 {
+		t.Fatalf("expected 2 rows after age>25 filter, got %d: %v", len(res.Rows), res.Rows)
+	}
+	for _, row := range res.Rows {
+		if row[0].IntVal != 1 {
+			t.Errorf("expected user_id=1 (Alice), got %d", row[0].IntVal)
+		}
+	}
+}
+
+// TestJoinWithLimit verifies that LIMIT is respected on join results.
+func TestJoinWithLimit(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+	setupJoinTables(t, db)
+
+	res := mustExec(t, db,
+		"SELECT u.id, o.id FROM users AS u JOIN orders AS o ON u.id = o.user_id LIMIT 1")
+	if len(res.Rows) != 1 {
+		t.Fatalf("expected 1 row with LIMIT 1, got %d", len(res.Rows))
+	}
+}
+
+// TestJoinExplainContainsNLJ verifies that EXPLAIN shows NestedLoopJoin.
+func TestJoinExplainContainsNLJ(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+	setupJoinTables(t, db)
+
+	res := mustExec(t, db,
+		"EXPLAIN SELECT u.id, o.amount FROM users AS u JOIN orders AS o ON u.id = o.user_id")
+	if !containsStr(res.Message, "NestedLoopJoin") {
+		t.Errorf("EXPLAIN output missing NestedLoopJoin:\n%s", res.Message)
+	}
+}
+
+func containsStr(s, sub string) bool {
+	return len(s) >= len(sub) && (s == sub || len(s) > 0 && findSubstr(s, sub))
+}
+
+func findSubstr(s, sub string) bool {
+	for i := 0; i <= len(s)-len(sub); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}

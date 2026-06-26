@@ -625,26 +625,17 @@ func (db *DB) insertIntoIndexes(tbl *catalog.Table, values []catalog.Value, pk u
 // execSelect builds a physical plan via the planner package, then drives it
 // with the Volcano iterator model.
 func (db *DB) execSelect(s *query.SelectStmt) (*Result, error) {
-	tbl, ok := db.catalog.GetTable(s.TableName)
-	if !ok {
-		return nil, fmt.Errorf("table %q does not exist", s.TableName)
-	}
-
-	// Pass stats to the planner so it can make cost-based decisions.
-	// If ANALYZE has not been run yet, ts is nil and the planner falls back
-	// to the Phase 9 rule-based heuristic.
-	ts, _ := db.statsDB.Get(s.TableName)
-	plan, err := planner.Plan(s, tbl, ts)
+	tables, statsMap, err := db.collectTablesForSelect(s)
 	if err != nil {
 		return nil, err
 	}
 
-	ps, err := db.pageStoreFor(s.TableName)
+	plan, err := planner.Plan(s, tables, statsMap)
 	if err != nil {
 		return nil, err
 	}
 
-	rows, err := execute(plan, ps, db, tbl)
+	rows, err := execute(plan, db)
 	if err != nil {
 		return nil, err
 	}
@@ -655,16 +646,41 @@ func (db *DB) execSelect(s *query.SelectStmt) (*Result, error) {
 
 // execExplain returns the physical plan as text without executing the query.
 func (db *DB) execExplain(s *query.ExplainStmt) (*Result, error) {
-	tbl, ok := db.catalog.GetTable(s.Inner.TableName)
-	if !ok {
-		return nil, fmt.Errorf("table %q does not exist", s.Inner.TableName)
+	tables, statsMap, err := db.collectTablesForSelect(s.Inner)
+	if err != nil {
+		return nil, err
 	}
-	ts, _ := db.statsDB.Get(s.Inner.TableName)
-	plan, err := planner.Plan(s.Inner, tbl, ts)
+	plan, err := planner.Plan(s.Inner, tables, statsMap)
 	if err != nil {
 		return nil, err
 	}
 	return &Result{Message: planner.Explain(plan)}, nil
+}
+
+// collectTablesForSelect resolves all table references in a SELECT statement
+// and returns the ordered slice of *catalog.Table plus a stats map.
+// Order: s.From[0], s.From[1], …, s.Joins[0].Table, s.Joins[1].Table, …
+func (db *DB) collectTablesForSelect(s *query.SelectStmt) ([]*catalog.Table, map[string]*stats.TableStats, error) {
+	refs := make([]query.TableRef, 0, len(s.From)+len(s.Joins))
+	refs = append(refs, s.From...)
+	for _, j := range s.Joins {
+		refs = append(refs, j.Table)
+	}
+
+	tables := make([]*catalog.Table, 0, len(refs))
+	statsMap := make(map[string]*stats.TableStats, len(refs))
+
+	for _, ref := range refs {
+		tbl, ok := db.catalog.GetTable(ref.Name)
+		if !ok {
+			return nil, nil, fmt.Errorf("table %q does not exist", ref.Name)
+		}
+		tables = append(tables, tbl)
+		if ts, ok := db.statsDB.Get(ref.Name); ok {
+			statsMap[strings.ToLower(ref.Name)] = ts
+		}
+	}
+	return tables, statsMap, nil
 }
 
 // pageStoreFor returns the correct PageStore for a table:

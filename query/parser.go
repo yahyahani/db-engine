@@ -234,39 +234,43 @@ func (p *parser) parseInsert() (*InsertStmt, error) {
 	return &InsertStmt{TableName: name.Text, Values: vals}, nil
 }
 
-// parseSelect parses: SELECT cols FROM name [WHERE ...]
+// parseSelect parses: SELECT cols FROM table [, table ...] [JOIN table ON cond ...] [WHERE ...] [LIMIT n]
 func (p *parser) parseSelect() (*SelectStmt, error) {
 	p.consume() // SELECT
 
+	// Parse SELECT column list.
 	var cols []string
 	if p.peek().Kind == TokStar {
 		p.consume()
 		cols = []string{"*"}
 	} else {
-		col, err := p.expect(TokIdent)
+		col, err := p.parseColRef()
 		if err != nil {
 			return nil, fmt.Errorf("SELECT: expected column name or *")
 		}
-		cols = append(cols, col.Text)
+		cols = append(cols, col)
 		for p.peek().Kind == TokComma {
 			p.consume()
-			col, err := p.expect(TokIdent)
+			col, err := p.parseColRef()
 			if err != nil {
 				return nil, fmt.Errorf("SELECT: expected column name after ','")
 			}
-			cols = append(cols, col.Text)
+			cols = append(cols, col)
 		}
 	}
 
 	if _, err := p.expect(TokFrom); err != nil {
 		return nil, fmt.Errorf("SELECT: expected FROM")
 	}
-	name, err := p.expect(TokIdent)
+
+	// Parse FROM clause: one or more table refs, then optional explicit JOINs.
+	from, joins, err := p.parseFromClause()
 	if err != nil {
-		return nil, fmt.Errorf("SELECT FROM: expected table name")
+		return nil, err
 	}
 
-	stmt := &SelectStmt{TableName: name.Text, Columns: cols}
+	stmt := &SelectStmt{Columns: cols, From: from, Joins: joins}
+
 	if p.peek().Kind == TokWhere {
 		p.consume()
 		where, err := p.parseWhere()
@@ -287,6 +291,125 @@ func (p *parser) parseSelect() (*SelectStmt, error) {
 		stmt.Limit = int(n.IntVal)
 	}
 	return stmt, nil
+}
+
+// parseColRef parses a column reference: "col", "table.col", or "table.*".
+func (p *parser) parseColRef() (string, error) {
+	name, err := p.expect(TokIdent)
+	if err != nil {
+		return "", fmt.Errorf("expected column name")
+	}
+	if p.peek().Kind != TokDot {
+		return name.Text, nil
+	}
+	p.consume() // consume '.'
+	if p.peek().Kind == TokStar {
+		p.consume()
+		return name.Text + ".*", nil
+	}
+	col, err := p.expect(TokIdent)
+	if err != nil {
+		return "", fmt.Errorf("expected column name after '.'")
+	}
+	return name.Text + "." + col.Text, nil
+}
+
+// parseFromClause parses: table [AS alias] [, table [AS alias] ...] [JOIN table [AS alias] ON cond ...]
+func (p *parser) parseFromClause() ([]TableRef, []JoinClause, error) {
+	first, err := p.parseTableRef()
+	if err != nil {
+		return nil, nil, fmt.Errorf("FROM: %w", err)
+	}
+	from := []TableRef{first}
+
+	// Additional comma-separated tables (implicit cross/inner join).
+	for p.peek().Kind == TokComma {
+		p.consume()
+		ref, err := p.parseTableRef()
+		if err != nil {
+			return nil, nil, fmt.Errorf("FROM: %w", err)
+		}
+		from = append(from, ref)
+	}
+
+	// Explicit JOIN clauses.
+	var joins []JoinClause
+	for p.peek().Kind == TokJoin || p.peek().Kind == TokInner {
+		if p.peek().Kind == TokInner {
+			p.consume() // INNER
+		}
+		if _, err := p.expect(TokJoin); err != nil {
+			return nil, nil, fmt.Errorf("expected JOIN")
+		}
+		ref, err := p.parseTableRef()
+		if err != nil {
+			return nil, nil, fmt.Errorf("JOIN: %w", err)
+		}
+		if p.peek().Kind != TokOn {
+			return nil, nil, fmt.Errorf("JOIN %s: expected ON", ref.Name)
+		}
+		p.consume() // ON
+		cond, err := p.parseJoinCond()
+		if err != nil {
+			return nil, nil, fmt.Errorf("JOIN %s ON: %w", ref.Name, err)
+		}
+		joins = append(joins, JoinClause{Table: ref, On: cond})
+	}
+
+	return from, joins, nil
+}
+
+// parseTableRef parses: name [AS alias] or name alias
+func (p *parser) parseTableRef() (TableRef, error) {
+	name, err := p.expect(TokIdent)
+	if err != nil {
+		return TableRef{}, fmt.Errorf("expected table name")
+	}
+	ref := TableRef{Name: name.Text}
+
+	// Optional alias: AS alias  or  bare alias (non-keyword identifier).
+	if p.peek().Kind == TokAs {
+		p.consume()
+		alias, err := p.expect(TokIdent)
+		if err != nil {
+			return TableRef{}, fmt.Errorf("AS: expected alias name")
+		}
+		ref.Alias = alias.Text
+	} else if p.peek().Kind == TokIdent {
+		// Bare alias: safe because all SQL keywords use their own token kinds,
+		// so a following TokIdent can only be a user-supplied alias.
+		ref.Alias = p.consume().Text
+	}
+	return ref, nil
+}
+
+// parseJoinCond parses a JOIN ON condition: must be col = col form.
+func (p *parser) parseJoinCond() (Condition, error) {
+	lhs, err := p.parseColRef()
+	if err != nil {
+		return Condition{}, fmt.Errorf("join condition: expected left column")
+	}
+	opTok := p.consume()
+	var op CompareOp
+	switch opTok.Kind {
+	case TokEq:
+		op = OpEq
+	case TokGt:
+		op = OpGt
+	case TokLt:
+		op = OpLt
+	case TokGte:
+		op = OpGte
+	case TokLte:
+		op = OpLte
+	default:
+		return Condition{}, fmt.Errorf("join condition: expected comparison operator, got %q", opTok.Text)
+	}
+	rhs, err := p.parseColRef()
+	if err != nil {
+		return Condition{}, fmt.Errorf("join condition: expected right column")
+	}
+	return Condition{Column: lhs, Op: op, RHSCol: rhs}, nil
 }
 
 // parseExplain parses: EXPLAIN SELECT ...
@@ -344,7 +467,8 @@ func (p *parser) parseAndGroup() ([]Condition, error) {
 }
 
 func (p *parser) parseCondition() (Condition, error) {
-	col, err := p.expect(TokIdent)
+	// LHS: possibly qualified column reference.
+	lhs, err := p.parseColRef()
 	if err != nil {
 		return Condition{}, fmt.Errorf("condition: expected column name")
 	}
@@ -364,11 +488,20 @@ func (p *parser) parseCondition() (Condition, error) {
 	default:
 		return Condition{}, fmt.Errorf("condition: expected =, >, <, >=, or <=, got %q", opTok.Text)
 	}
+	// RHS: identifier → column reference (join/cross-table condition);
+	//      literal  → value filter condition.
+	if p.peek().Kind == TokIdent {
+		rhs, err := p.parseColRef()
+		if err != nil {
+			return Condition{}, fmt.Errorf("condition: %w", err)
+		}
+		return Condition{Column: lhs, Op: op, RHSCol: rhs}, nil
+	}
 	val, err := p.parseValue()
 	if err != nil {
 		return Condition{}, fmt.Errorf("condition: %w", err)
 	}
-	return Condition{Column: col.Text, Op: op, Val: val}, nil
+	return Condition{Column: lhs, Op: op, Val: val}, nil
 }
 
 func (p *parser) parseValue() (catalog.Value, error) {

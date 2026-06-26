@@ -22,7 +22,7 @@ design decision in a real database engine exists, not just how to use one.
 | 8 | ✅ Done | Transaction integration — crash recovery tests, no-steal verification |
 | 9 | ✅ Done | Secondary indexes — non-PK indexes, index selection |
 | 10 | ✅ Done | Statistics — cardinality estimates, cost-based optimizer |
-| 11 | 📋 Todo | JOIN — multi-table queries, hash join |
+| 11 | ✅ Done | JOIN — multi-table queries, nested-loop join, predicate pushdown |
 | 12 | 📋 Todo | Concurrency — MVCC, multiple readers/writers |
 | 13 | 📋 Todo | Network — TCP server, wire protocol |
 
@@ -343,17 +343,43 @@ ANALYZE users;
 
 ---
 
-## Planned phases
-
 ### Phase 11 — JOIN and multi-table queries
 
-Extends the SQL parser and planner to support `FROM t1, t2 WHERE t1.id = t2.fk`
-and explicit `JOIN` syntax. The planner emits a `Join` node (nested-loop join or
-hash join depending on cost estimates from Phase 9). The Volcano model
-accommodates join nodes naturally — a join node calls `Next()` on both children
-and pairs matching rows.
+Extends the SQL parser and planner to support both implicit (`FROM t1, t2 WHERE
+t1.id = t2.fk`) and explicit (`JOIN t2 ON t1.id = t2.fk`) multi-table query
+syntax.
+
+New AST types: `TableRef` (table name + optional alias), `JoinClause` (join
+table + ON condition), `Condition.RHSCol` for col-op-col join predicates.
+`SelectStmt.TableName` replaced by `SelectStmt.From []TableRef`.
+
+The planner builds a **left-deep `NestedLoopJoin` tree**: for each additional
+table, join conditions are matched via `condConnects()`, and single-table filter
+predicates are pushed below the join to leaf `IndexScan`/`Filter` nodes
+(**predicate pushdown**).
+
+The executor adds `nlJoinOp` (Volcano iterator): re-opens the right child for
+each left row, evaluates ON conditions with a `colMap` built at `Open()` time
+for O(1) column resolution by both qualified (`t.col`) and bare (`col`) names.
+
+New SQL syntax:
+```sql
+SELECT u.id, o.amount
+FROM users AS u
+JOIN orders AS o ON u.id = o.user_id
+WHERE u.age > 25
+LIMIT 10;
+
+-- implicit join (equivalent):
+SELECT u.id, o.amount
+FROM users AS u, orders AS o
+WHERE u.id = o.user_id AND u.age > 25
+LIMIT 10;
+```
 
 ---
+
+## Planned phases
 
 ### Phase 12 — Concurrency
 

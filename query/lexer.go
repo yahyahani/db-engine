@@ -32,6 +32,9 @@ var keywords = map[string]TokenKind{
 	"on":       TokOn,
 	"drop":     TokDrop,
 	"analyze":  TokAnalyze,
+	"join":     TokJoin,
+	"inner":    TokInner,
+	"as":       TokAs,
 }
 
 // Tokenize converts a SQL string into a flat slice of Tokens.
@@ -104,6 +107,9 @@ func Tokenize(input string) ([]Token, error) {
 			i++
 		case ';':
 			tokens = append(tokens, Token{Kind: TokSemi, Text: ";"})
+			i++
+		case '.':
+			tokens = append(tokens, Token{Kind: TokDot, Text: "."})
 			i++
 		case '\'':
 			// String literal delimited by single quotes. No escape sequences —

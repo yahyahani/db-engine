@@ -14,22 +14,22 @@
 <style>
 /* ── Themes ────────────────────────────────────────────────────────────────── */
 html[data-theme="dark"] {
-  --bg-a: #05070f;
-  --bg-b: #080d1c;
-  --glow-a: rgba(20,184,166,.055);
-  --glow-b: rgba(99,102,241,.035);
-  --glass:        rgba(9,12,24,.76);
+  --bg-a: #06102a;
+  --bg-b: #010308;
+  --glow-a: rgba(20,184,166,.14);
+  --glow-b: rgba(99,102,241,.08);
+  --glass:        rgba(7,10,22,.45);
   --glass-solid:  #0b0e1e;
-  --glass-border: rgba(255,255,255,.07);
-  --glass-hi:     rgba(255,255,255,.03);
-  --glass-shadow: 0 2px 40px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.04);
+  --glass-border: rgba(20,184,166,.18);
+  --glass-hi:     rgba(20,184,166,.06);
+  --glass-shadow: 0 4px 40px rgba(0,0,0,.6), 0 0 0 1px rgba(20,184,166,.07), inset 0 1px 0 rgba(255,255,255,.06);
   --text-1: #e4e6f2;
   --text-2: #8890b0;
   --text-3: #454b68;
   --accent:    #14b8a6;
   --accent-hi: #2dd4bf;
   --accent-dim: rgba(20,184,166,.12);
-  --accent-glow: rgba(20,184,166,.18);
+  --accent-glow: rgba(20,184,166,.55);
   --red:    #f87171;
   --green:  #34d399;
   --amber:  #fbbf24;
@@ -37,9 +37,9 @@ html[data-theme="dark"] {
   --cyan:   #38bdf8;
   --tbl-stripe: rgba(255,255,255,.018);
   --tbl-hover:  rgba(20,184,166,.07);
-  --node-bg-opacity: .065;
-  --cm-bg:       rgba(5,7,14,.88);
-  --cm-gutter:   rgba(5,7,14,.88);
+  --node-bg-opacity: .22;
+  --cm-bg:       rgba(4,8,20,.9);
+  --cm-gutter:   rgba(4,8,20,.9);
   --cm-gutter-b: rgba(255,255,255,.04);
   --cm-linenum:  #2e3450;
   --cm-cursor:   #14b8a6;
@@ -53,22 +53,22 @@ html[data-theme="dark"] {
 }
 
 html[data-theme="light"] {
-  --bg-a: #eef2f7;
-  --bg-b: #dce8f5;
-  --glow-a: rgba(20,184,166,.07);
-  --glow-b: rgba(99,102,241,.05);
-  --glass:        rgba(255,255,255,.72);
+  --bg-a: #f2f7ff;
+  --bg-b: #c0d8f4;
+  --glow-a: rgba(13,148,136,.1);
+  --glow-b: rgba(99,102,241,.07);
+  --glass:        rgba(255,255,255,.52);
   --glass-solid:  #f4f7fb;
-  --glass-border: rgba(0,0,0,.07);
-  --glass-hi:     rgba(255,255,255,.6);
-  --glass-shadow: 0 2px 24px rgba(0,0,0,.08), inset 0 1px 0 rgba(255,255,255,.8);
+  --glass-border: rgba(13,148,136,.18);
+  --glass-hi:     rgba(13,148,136,.06);
+  --glass-shadow: 0 4px 28px rgba(0,80,180,.12), 0 0 0 1px rgba(13,148,136,.07), inset 0 1px 0 rgba(255,255,255,.85);
   --text-1: #131726;
   --text-2: #505878;
   --text-3: #9ba3c0;
   --accent:    #0d9488;
   --accent-hi: #14b8a6;
   --accent-dim: rgba(13,148,136,.1);
-  --accent-glow: rgba(13,148,136,.15);
+  --accent-glow: rgba(13,148,136,.42);
   --red:    #dc2626;
   --green:  #059669;
   --amber:  #d97706;
@@ -76,9 +76,9 @@ html[data-theme="light"] {
   --cyan:   #0284c7;
   --tbl-stripe: rgba(0,0,0,.02);
   --tbl-hover:  rgba(13,148,136,.06);
-  --node-bg-opacity: .04;
-  --cm-bg:       rgba(255,255,255,.92);
-  --cm-gutter:   rgba(248,250,252,.95);
+  --node-bg-opacity: .20;
+  --cm-bg:       rgba(255,255,255,.88);
+  --cm-gutter:   rgba(248,250,252,.92);
   --cm-gutter-b: rgba(0,0,0,.05);
   --cm-linenum:  #c8d0e4;
   --cm-cursor:   #0d9488;
@@ -133,15 +133,15 @@ body {
 
 #bg-svg .bg-e {
   stroke: var(--accent);
-  stroke-width: .5;
+  stroke-width: .9;
   fill: none;
 }
-#bg-svg .bg-e.ll  { stroke-dasharray: 1.5 2.5; }
-#bg-svg .bg-e.fade { opacity: .5; }
+#bg-svg .bg-e.ll  { stroke-dasharray: 2.5 3; }
+#bg-svg .bg-e.fade { opacity: .55; }
 
 #bg-svg .bg-n { fill: var(--accent); }
-#bg-svg .bg-n.leaf { fill: none; stroke: var(--accent); stroke-width: .6; }
-#bg-svg .bg-n.sub  { opacity: .4; }
+#bg-svg .bg-n.leaf { fill: none; stroke: var(--accent); stroke-width: 1; }
+#bg-svg .bg-n.sub  { opacity: .5; }
 
 /* ── Glass ─────────────────────────────────────────────────────────────────── */
 .glass {
@@ -191,7 +191,7 @@ body {
 .logo-svg {
   width: 28px; height: 28px;
   color: var(--accent);
-  filter: drop-shadow(0 0 6px var(--accent-glow));
+  filter: drop-shadow(0 0 8px var(--accent)) drop-shadow(0 0 3px var(--accent-glow));
   transition: color .3s, filter .3s;
   flex-shrink: 0;
 }
@@ -245,38 +245,67 @@ body {
   color: var(--text-3);
 }
 
-/* Theme toggle */
-.theme-btn {
-  width: 32px; height: 32px;
-  border: 1px solid var(--glass-border);
-  background: var(--glass-hi);
-  border-radius: 8px;
+/* Theme toggle pill */
+.theme-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: none;
+  border: none;
   cursor: pointer;
+  padding: 2px;
+}
+.ti {
+  width: 16px; height: 16px;
   display: flex; align-items: center; justify-content: center;
-  font-size: 15px;
+  opacity: .35;
+  transition: opacity .3s, color .3s;
+  flex-shrink: 0;
   color: var(--text-2);
-  transition: all .15s;
 }
-.theme-btn:hover {
-  color: var(--accent);
-  border-color: var(--accent-dim);
-  background: var(--accent-dim);
+.ti svg { width: 14px; height: 14px; fill: currentColor; }
+html[data-theme="light"] .ti-sun  { opacity: 1; color: var(--accent); }
+html[data-theme="dark"]  .ti-moon { opacity: 1; color: var(--accent); }
+.toggle-track {
+  width: 40px; height: 22px;
+  border-radius: 11px;
+  border: 1.5px solid rgba(20,184,166,.28);
+  background: rgba(20,184,166,.1);
+  position: relative;
+  transition: background .3s, border-color .3s;
+  flex-shrink: 0;
 }
+html[data-theme="light"] .toggle-track {
+  background: rgba(13,148,136,.1);
+  border-color: rgba(13,148,136,.28);
+}
+.toggle-thumb {
+  position: absolute;
+  top: 2px;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 10px var(--accent-glow), 0 1px 4px rgba(0,0,0,.3);
+  transition: left .28s cubic-bezier(.34,1.4,.64,1), background .3s, box-shadow .3s;
+}
+html[data-theme="dark"]  .toggle-thumb { left: 22px; }
+html[data-theme="light"] .toggle-thumb { left: 2px; }
 
 /* ── Layout ────────────────────────────────────────────────────────────────── */
 .layout {
   display: grid;
   grid-template-columns: 252px 1fr;
   overflow: hidden;
-  gap: 0;
+  gap: 10px;
+  padding: 0 10px 10px;
 }
 
 /* ── Sidebar ───────────────────────────────────────────────────────────────── */
 .sidebar {
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--glass-border);
-  border-radius: 0;
+  border-right: none;
+  border-radius: 12px;
   overflow: hidden;
 }
 
@@ -437,14 +466,16 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  gap: 0;
+  gap: 10px;
+  min-height: 0;
 }
 
 /* ── Editor panel ──────────────────────────────────────────────────────────── */
 .editor-panel {
   flex-shrink: 0;
-  border-bottom: 1px solid var(--glass-border);
-  border-radius: 0;
+  border-bottom: none;
+  border-radius: 12px;
+  overflow: hidden;
 }
 
 .panel-bar {
@@ -486,12 +517,13 @@ body {
   background: var(--accent);
   color: #fff;
   border-color: var(--accent);
-  box-shadow: 0 0 12px var(--accent-glow);
+  box-shadow: 0 2px 24px var(--accent-glow), 0 0 12px var(--accent-glow), 0 0 0 1px var(--accent);
 }
 .btn-run:hover:not(:disabled) {
   background: var(--accent-hi);
   border-color: var(--accent-hi);
-  box-shadow: 0 0 18px var(--accent-glow);
+  box-shadow: 0 4px 36px var(--accent-glow), 0 0 20px var(--accent-glow), 0 0 0 1px var(--accent-hi);
+  transform: translateY(-1px);
 }
 
 .btn-ghost {
@@ -576,7 +608,8 @@ kbd {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border-radius: 0;
+  border-radius: 12px;
+  min-height: 0;
 }
 
 .results-meta {
@@ -600,14 +633,17 @@ kbd {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 10px;
+  gap: 12px;
   height: 100%;
   min-height: 80px;
   color: var(--text-3);
   animation: fadeIn .3s ease-out;
 }
-.empty-icon { opacity: .25; }
-.empty-state p { font-size: 12.5px; }
+.empty-icon {
+  opacity: .38;
+  filter: drop-shadow(0 0 10px var(--accent)) drop-shadow(0 0 4px var(--accent-glow));
+}
+.empty-state p { font-size: 13px; letter-spacing: .01em; }
 
 /* ── Result table ──────────────────────────────────────────────────────────── */
 .result-wrap {
@@ -779,6 +815,19 @@ kbd {
 <!-- B+ Tree background pattern -->
 <div class="bg-layer">
   <svg id="bg-svg" viewBox="0 0 100 100" preserveAspectRatio="xMidYMid slice">
+    <defs>
+      <filter id="node-glow" x="-80%" y="-80%" width="260%" height="260%">
+        <feGaussianBlur stdDeviation="2.8" result="blur"/>
+        <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+      </filter>
+    </defs>
+    <!-- Large ambient glow nodes -->
+    <circle class="bg-n" cx="50" cy="-3" r="5.5" filter="url(#node-glow)" opacity=".6"/>
+    <circle class="bg-n" cx="25" cy="12" r="4.5" filter="url(#node-glow)" opacity=".55"/>
+    <circle class="bg-n" cx="75" cy="12" r="4.5" filter="url(#node-glow)" opacity=".55"/>
+    <circle class="bg-n leaf" cx="6"  cy="52" r="5"   filter="url(#node-glow)" opacity=".45"/>
+    <circle class="bg-n leaf" cx="44" cy="52" r="5"   filter="url(#node-glow)" opacity=".45"/>
+    <circle class="bg-n leaf" cx="94" cy="52" r="5"   filter="url(#node-glow)" opacity=".45"/>
     <!-- Internal edges -->
     <line class="bg-e" x1="50" y1="-3" x2="25" y2="12"/>
     <line class="bg-e" x1="50" y1="-3" x2="75" y2="12"/>
@@ -820,38 +869,38 @@ kbd {
     <line class="bg-e fade" x1="94" y1="52" x2="91" y2="78"/>
     <line class="bg-e fade" x1="94" y1="52" x2="97" y2="78"/>
     <!-- Internal nodes -->
-    <circle class="bg-n" cx="25" cy="12" r="2"/>
-    <circle class="bg-n" cx="75" cy="12" r="2"/>
-    <circle class="bg-n" cx="12" cy="30" r="1.8"/>
-    <circle class="bg-n" cx="38" cy="30" r="1.8"/>
-    <circle class="bg-n" cx="62" cy="30" r="1.8"/>
-    <circle class="bg-n" cx="88" cy="30" r="1.8"/>
+    <circle class="bg-n" cx="25" cy="12" r="2.7"/>
+    <circle class="bg-n" cx="75" cy="12" r="2.7"/>
+    <circle class="bg-n" cx="12" cy="30" r="2.2"/>
+    <circle class="bg-n" cx="38" cy="30" r="2.2"/>
+    <circle class="bg-n" cx="62" cy="30" r="2.2"/>
+    <circle class="bg-n" cx="88" cy="30" r="2.2"/>
     <!-- Leaf nodes (hollow = B+ leaf pages) -->
-    <circle class="bg-n leaf" cx="6"  cy="52" r="2.4"/>
-    <circle class="bg-n leaf" cx="18" cy="52" r="2.4"/>
-    <circle class="bg-n leaf" cx="32" cy="52" r="2.4"/>
-    <circle class="bg-n leaf" cx="44" cy="52" r="2.4"/>
-    <circle class="bg-n leaf" cx="56" cy="52" r="2.4"/>
-    <circle class="bg-n leaf" cx="68" cy="52" r="2.4"/>
-    <circle class="bg-n leaf" cx="82" cy="52" r="2.4"/>
-    <circle class="bg-n leaf" cx="94" cy="52" r="2.4"/>
+    <circle class="bg-n leaf" cx="6"  cy="52" r="3"/>
+    <circle class="bg-n leaf" cx="18" cy="52" r="3"/>
+    <circle class="bg-n leaf" cx="32" cy="52" r="3"/>
+    <circle class="bg-n leaf" cx="44" cy="52" r="3"/>
+    <circle class="bg-n leaf" cx="56" cy="52" r="3"/>
+    <circle class="bg-n leaf" cx="68" cy="52" r="3"/>
+    <circle class="bg-n leaf" cx="82" cy="52" r="3"/>
+    <circle class="bg-n leaf" cx="94" cy="52" r="3"/>
     <!-- Sub-leaves (fading) -->
-    <circle class="bg-n sub" cx="3"  cy="78" r="1.5"/>
-    <circle class="bg-n sub" cx="9"  cy="78" r="1.5"/>
-    <circle class="bg-n sub" cx="15" cy="78" r="1.5"/>
-    <circle class="bg-n sub" cx="21" cy="78" r="1.5"/>
-    <circle class="bg-n sub" cx="29" cy="78" r="1.5"/>
-    <circle class="bg-n sub" cx="35" cy="78" r="1.5"/>
-    <circle class="bg-n sub" cx="41" cy="78" r="1.5"/>
-    <circle class="bg-n sub" cx="47" cy="78" r="1.5"/>
-    <circle class="bg-n sub" cx="53" cy="78" r="1.5"/>
-    <circle class="bg-n sub" cx="59" cy="78" r="1.5"/>
-    <circle class="bg-n sub" cx="65" cy="78" r="1.5"/>
-    <circle class="bg-n sub" cx="71" cy="78" r="1.5"/>
-    <circle class="bg-n sub" cx="79" cy="78" r="1.5"/>
-    <circle class="bg-n sub" cx="85" cy="78" r="1.5"/>
-    <circle class="bg-n sub" cx="91" cy="78" r="1.5"/>
-    <circle class="bg-n sub" cx="97" cy="78" r="1.5"/>
+    <circle class="bg-n sub" cx="3"  cy="78" r="2"/>
+    <circle class="bg-n sub" cx="9"  cy="78" r="2"/>
+    <circle class="bg-n sub" cx="15" cy="78" r="2"/>
+    <circle class="bg-n sub" cx="21" cy="78" r="2"/>
+    <circle class="bg-n sub" cx="29" cy="78" r="2"/>
+    <circle class="bg-n sub" cx="35" cy="78" r="2"/>
+    <circle class="bg-n sub" cx="41" cy="78" r="2"/>
+    <circle class="bg-n sub" cx="47" cy="78" r="2"/>
+    <circle class="bg-n sub" cx="53" cy="78" r="2"/>
+    <circle class="bg-n sub" cx="59" cy="78" r="2"/>
+    <circle class="bg-n sub" cx="65" cy="78" r="2"/>
+    <circle class="bg-n sub" cx="71" cy="78" r="2"/>
+    <circle class="bg-n sub" cx="79" cy="78" r="2"/>
+    <circle class="bg-n sub" cx="85" cy="78" r="2"/>
+    <circle class="bg-n sub" cx="91" cy="78" r="2"/>
+    <circle class="bg-n sub" cx="97" cy="78" r="2"/>
   </svg>
 </div>
 
@@ -886,8 +935,30 @@ kbd {
           <span id="pool-label">cache —</span>
         </div>
       </div>
-      <button class="theme-btn" onclick="toggleTheme()" id="theme-btn" title="Toggle light / dark">
-        🌙
+      <button class="theme-toggle" onclick="toggleTheme()" id="theme-btn" title="Toggle light / dark">
+        <span class="ti ti-sun">
+          <svg viewBox="0 0 14 14" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="7" cy="7" r="2.8"/>
+            <g stroke="currentColor" stroke-width="1.2" stroke-linecap="round" fill="none">
+              <line x1="7" y1="1" x2="7" y2="2.4"/>
+              <line x1="7" y1="11.6" x2="7" y2="13"/>
+              <line x1="1" y1="7" x2="2.4" y2="7"/>
+              <line x1="11.6" y1="7" x2="13" y2="7"/>
+              <line x1="2.9" y1="2.9" x2="3.9" y2="3.9"/>
+              <line x1="10.1" y1="10.1" x2="11.1" y2="11.1"/>
+              <line x1="11.1" y1="2.9" x2="10.1" y2="3.9"/>
+              <line x1="3.9" y1="10.1" x2="2.9" y2="11.1"/>
+            </g>
+          </svg>
+        </span>
+        <span class="toggle-track">
+          <span class="toggle-thumb" id="toggle-thumb"></span>
+        </span>
+        <span class="ti ti-moon">
+          <svg viewBox="0 0 14 14" xmlns="http://www.w3.org/2000/svg">
+            <path d="M11.5 8.5A5 5 0 0 1 5.5 2.5a5.5 5.5 0 1 0 6 6z"/>
+          </svg>
+        </span>
       </button>
     </div>
   </header>
@@ -942,15 +1013,15 @@ kbd {
         </div>
         <div class="results-body" id="results-body">
           <div class="empty-state">
-            <!-- Mini database cylinder as empty-state icon -->
-            <svg class="empty-icon" width="36" height="36" viewBox="0 0 28 28" fill="none" style="opacity:.18">
-              <ellipse cx="14" cy="22" rx="10" ry="3" stroke="currentColor" stroke-width="1.4"/>
-              <line x1="4" y1="13" x2="4" y2="22" stroke="currentColor" stroke-width="1.4"/>
-              <line x1="24" y1="13" x2="24" y2="22" stroke="currentColor" stroke-width="1.4"/>
-              <ellipse cx="14" cy="13" rx="10" ry="3" stroke="currentColor" stroke-width="1.4"/>
-              <line x1="4" y1="6" x2="4" y2="13" stroke="currentColor" stroke-width="1.4"/>
-              <line x1="24" y1="6" x2="24" y2="13" stroke="currentColor" stroke-width="1.4"/>
-              <ellipse cx="14" cy="6" rx="10" ry="3" stroke="currentColor" stroke-width="1.4"/>
+            <!-- Database cylinder empty-state icon -->
+            <svg class="empty-icon" width="56" height="56" viewBox="0 0 28 28" fill="none" color="var(--accent)">
+              <ellipse cx="14" cy="22" rx="10" ry="3" stroke="currentColor" stroke-width="1.3"/>
+              <line x1="4" y1="13" x2="4" y2="22" stroke="currentColor" stroke-width="1.3"/>
+              <line x1="24" y1="13" x2="24" y2="22" stroke="currentColor" stroke-width="1.3"/>
+              <ellipse cx="14" cy="13" rx="10" ry="3" stroke="currentColor" stroke-width="1.3"/>
+              <line x1="4" y1="6" x2="4" y2="13" stroke="currentColor" stroke-width="1.3"/>
+              <line x1="24" y1="6" x2="24" y2="13" stroke="currentColor" stroke-width="1.3"/>
+              <ellipse cx="14" cy="6" rx="10" ry="3" stroke="currentColor" stroke-width="1.3"/>
             </svg>
             <p>Run a query to see results</p>
           </div>
@@ -989,7 +1060,6 @@ document.addEventListener('DOMContentLoaded', () => {
 function toggleTheme() {
   darkMode = !darkMode;
   document.documentElement.dataset.theme = darkMode ? 'dark' : 'light';
-  document.getElementById('theme-btn').textContent = darkMode ? '🌙' : '☀️';
 }
 
 // ── CodeMirror ─────────────────────────────────────────────────────────────

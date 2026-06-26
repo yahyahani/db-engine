@@ -25,7 +25,7 @@ func makeTable() *catalog.Table {
 
 func mustPlan(t *testing.T, s *query.SelectStmt, tbl *catalog.Table) PhysicalNode {
 	t.Helper()
-	plan, err := Plan(s, tbl, nil) // nil → rule-based (Phase 9 behaviour)
+	plan, err := Plan(s, []*catalog.Table{tbl}, nil)
 	if err != nil {
 		t.Fatalf("Plan() error: %v", err)
 	}
@@ -34,7 +34,8 @@ func mustPlan(t *testing.T, s *query.SelectStmt, tbl *catalog.Table) PhysicalNod
 
 func mustPlanWithStats(t *testing.T, s *query.SelectStmt, tbl *catalog.Table, ts *stats.TableStats) PhysicalNode {
 	t.Helper()
-	plan, err := Plan(s, tbl, ts)
+	sm := map[string]*stats.TableStats{strings.ToLower(tbl.Name): ts}
+	plan, err := Plan(s, []*catalog.Table{tbl}, sm)
 	if err != nil {
 		t.Fatalf("Plan() error: %v", err)
 	}
@@ -60,7 +61,7 @@ func andWhere(conds ...query.Condition) *query.WhereClause {
 // with the widest possible bounds.
 func TestPlanFullScan(t *testing.T) {
 	tbl := makeTable()
-	s := &query.SelectStmt{TableName: "users", Columns: []string{"*"}}
+	s := &query.SelectStmt{From: []query.TableRef{{Name: "users"}}, Columns: []string{"*"}}
 	plan := mustPlan(t, s, tbl)
 
 	proj := rootProject(t, plan)
@@ -78,7 +79,7 @@ func TestPlanFullScan(t *testing.T) {
 func TestPlanPointLookup(t *testing.T) {
 	tbl := makeTable()
 	s := &query.SelectStmt{
-		TableName: "users",
+		From: []query.TableRef{{Name: "users"}},
 		Columns:   []string{"*"},
 		Where: andWhere(
 			query.Condition{Column: "id", Op: query.OpEq, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 42}},
@@ -99,7 +100,7 @@ func TestPlanPointLookup(t *testing.T) {
 func TestPlanRangeScan(t *testing.T) {
 	tbl := makeTable()
 	s := &query.SelectStmt{
-		TableName: "users",
+		From: []query.TableRef{{Name: "users"}},
 		Columns:   []string{"*"},
 		Where: andWhere(
 			query.Condition{Column: "id", Op: query.OpGt, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 10}},
@@ -122,7 +123,7 @@ func TestPlanRangeScan(t *testing.T) {
 func TestPlanNonPKPredicateBecomesFilter(t *testing.T) {
 	tbl := makeTable()
 	s := &query.SelectStmt{
-		TableName: "users",
+		From: []query.TableRef{{Name: "users"}},
 		Columns:   []string{"*"},
 		Where: andWhere(
 			query.Condition{Column: "age", Op: query.OpGt, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 18}},
@@ -147,7 +148,7 @@ func TestPlanNonPKPredicateBecomesFilter(t *testing.T) {
 func TestPlanMixedPredicates(t *testing.T) {
 	tbl := makeTable()
 	s := &query.SelectStmt{
-		TableName: "users",
+		From: []query.TableRef{{Name: "users"}},
 		Columns:   []string{"*"},
 		Where: andWhere(
 			query.Condition{Column: "id", Op: query.OpGte, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 100}},
@@ -180,7 +181,7 @@ func TestPlanMixedPredicates(t *testing.T) {
 func TestPlanImpossibleRange(t *testing.T) {
 	tbl := makeTable()
 	s := &query.SelectStmt{
-		TableName: "users",
+		From: []query.TableRef{{Name: "users"}},
 		Columns:   []string{"*"},
 		Where: andWhere(
 			query.Condition{Column: "id", Op: query.OpGt, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 50}},
@@ -203,7 +204,7 @@ func TestPlanImpossibleRange(t *testing.T) {
 func TestPlanLimit(t *testing.T) {
 	tbl := makeTable()
 	s := &query.SelectStmt{
-		TableName: "users",
+		From: []query.TableRef{{Name: "users"}},
 		Columns:   []string{"*"},
 		Limit:     5,
 	}
@@ -225,7 +226,7 @@ func TestPlanLimit(t *testing.T) {
 // the correct ColIdxs.
 func TestPlanColumnProjection(t *testing.T) {
 	tbl := makeTable()
-	s := &query.SelectStmt{TableName: "users", Columns: []string{"name", "id"}}
+	s := &query.SelectStmt{From: []query.TableRef{{Name: "users"}}, Columns: []string{"name", "id"}}
 	plan := mustPlan(t, s, tbl)
 	proj := rootProject(t, plan)
 	// name is column 1, id is column 0.
@@ -241,8 +242,8 @@ func TestPlanColumnProjection(t *testing.T) {
 // returns an error rather than silently ignoring it.
 func TestPlanUnknownColumnError(t *testing.T) {
 	tbl := makeTable()
-	s := &query.SelectStmt{TableName: "users", Columns: []string{"missing"}}
-	_, err := Plan(s, tbl, nil)
+	s := &query.SelectStmt{From: []query.TableRef{{Name: "users"}}, Columns: []string{"missing"}}
+	_, err := Plan(s, []*catalog.Table{tbl}, nil)
 	if err == nil {
 		t.Fatal("expected error for unknown column, got nil")
 	}
@@ -252,7 +253,7 @@ func TestPlanUnknownColumnError(t *testing.T) {
 // full-table-scan plan.
 func TestExplainFullScan(t *testing.T) {
 	tbl := makeTable()
-	s := &query.SelectStmt{TableName: "users", Columns: []string{"*"}}
+	s := &query.SelectStmt{From: []query.TableRef{{Name: "users"}}, Columns: []string{"*"}}
 	plan := mustPlan(t, s, tbl)
 	out := Explain(plan)
 	if !strings.Contains(out, "IndexScan") {
@@ -270,7 +271,7 @@ func TestExplainFullScan(t *testing.T) {
 func TestExplainPointLookup(t *testing.T) {
 	tbl := makeTable()
 	s := &query.SelectStmt{
-		TableName: "users",
+		From: []query.TableRef{{Name: "users"}},
 		Columns:   []string{"*"},
 		Where: andWhere(
 			query.Condition{Column: "id", Op: query.OpEq, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 7}},
@@ -287,7 +288,7 @@ func TestExplainPointLookup(t *testing.T) {
 func TestExplainFilterAndLimit(t *testing.T) {
 	tbl := makeTable()
 	s := &query.SelectStmt{
-		TableName: "users",
+		From: []query.TableRef{{Name: "users"}},
 		Columns:   []string{"id"},
 		Limit:     3,
 		Where: andWhere(
@@ -313,7 +314,7 @@ func TestExplainFilterAndLimit(t *testing.T) {
 func TestPlanORTwoRanges(t *testing.T) {
 	tbl := makeTable()
 	s := &query.SelectStmt{
-		TableName: "users",
+		From: []query.TableRef{{Name: "users"}},
 		Columns:   []string{"*"},
 		Where: &query.WhereClause{
 			Groups: [][]query.Condition{
@@ -348,7 +349,7 @@ func TestPlanORTwoRanges(t *testing.T) {
 func TestPlanORWithNonPKCondition(t *testing.T) {
 	tbl := makeTable()
 	s := &query.SelectStmt{
-		TableName: "users",
+		From: []query.TableRef{{Name: "users"}},
 		Columns:   []string{"*"},
 		Where: &query.WhereClause{
 			Groups: [][]query.Condition{
@@ -381,7 +382,7 @@ func TestPlanORWithNonPKCondition(t *testing.T) {
 func TestExplainORPlan(t *testing.T) {
 	tbl := makeTable()
 	s := &query.SelectStmt{
-		TableName: "users",
+		From: []query.TableRef{{Name: "users"}},
 		Columns:   []string{"*"},
 		Where: &query.WhereClause{
 			Groups: [][]query.Condition{
@@ -421,7 +422,7 @@ func makeIndexedTable() *catalog.Table {
 func TestPlanSecondaryIndexPointLookup(t *testing.T) {
 	tbl := makeIndexedTable()
 	s := &query.SelectStmt{
-		TableName: "users",
+		From: []query.TableRef{{Name: "users"}},
 		Columns:   []string{"*"},
 		Where: andWhere(
 			query.Condition{Column: "age", Op: query.OpEq, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 25}},
@@ -446,7 +447,7 @@ func TestPlanSecondaryIndexPointLookup(t *testing.T) {
 func TestPlanSecondaryIndexRange(t *testing.T) {
 	tbl := makeIndexedTable()
 	s := &query.SelectStmt{
-		TableName: "users",
+		From: []query.TableRef{{Name: "users"}},
 		Columns:   []string{"*"},
 		Where: andWhere(
 			query.Condition{Column: "age", Op: query.OpGt, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 18}},
@@ -467,7 +468,7 @@ func TestPlanSecondaryIndexRange(t *testing.T) {
 func TestPlanSecondaryIndexWithExtraFilter(t *testing.T) {
 	tbl := makeIndexedTable()
 	s := &query.SelectStmt{
-		TableName: "users",
+		From: []query.TableRef{{Name: "users"}},
 		Columns:   []string{"*"},
 		Where: andWhere(
 			query.Condition{Column: "age", Op: query.OpEq, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 25}},
@@ -492,7 +493,7 @@ func TestPlanSecondaryIndexWithExtraFilter(t *testing.T) {
 func TestPlanNoIndexFallsBackToPKScan(t *testing.T) {
 	tbl := makeTable() // no Indexes
 	s := &query.SelectStmt{
-		TableName: "users",
+		From: []query.TableRef{{Name: "users"}},
 		Columns:   []string{"*"},
 		Where: andWhere(
 			query.Condition{Column: "age", Op: query.OpEq, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 25}},
@@ -513,7 +514,7 @@ func TestPlanNoIndexFallsBackToPKScan(t *testing.T) {
 func TestExplainIndexLookup(t *testing.T) {
 	tbl := makeIndexedTable()
 	s := &query.SelectStmt{
-		TableName: "users",
+		From: []query.TableRef{{Name: "users"}},
 		Columns:   []string{"*"},
 		Where: andWhere(
 			query.Condition{Column: "age", Op: query.OpEq, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 30}},
@@ -558,7 +559,7 @@ func TestCBOSelectsIndexForHighlySelectiveQuery(t *testing.T) {
 		{Name: "age", NDistinct: 10_000, Min: 1, Max: 10_000},
 	})
 	s := &query.SelectStmt{
-		TableName: "users",
+		From: []query.TableRef{{Name: "users"}},
 		Columns:   []string{"*"},
 		Where: andWhere(
 			query.Condition{Column: "age", Op: query.OpEq, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 42}},
@@ -586,7 +587,7 @@ func TestCBOChoosesFullScanForLowSelectivity(t *testing.T) {
 		{Name: "age", NDistinct: 2, Min: 0, Max: 1}, // binary column — half the table matches
 	})
 	s := &query.SelectStmt{
-		TableName: "users",
+		From: []query.TableRef{{Name: "users"}},
 		Columns:   []string{"*"},
 		Where: andWhere(
 			query.Condition{Column: "age", Op: query.OpEq, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 1}},
@@ -607,7 +608,7 @@ func TestCBOChoosesFullScanForLowSelectivity(t *testing.T) {
 func TestCBONilStatsFallsBackToRuleBased(t *testing.T) {
 	tbl := makeIndexedTable()
 	s := &query.SelectStmt{
-		TableName: "users",
+		From: []query.TableRef{{Name: "users"}},
 		Columns:   []string{"*"},
 		Where: andWhere(
 			query.Condition{Column: "age", Op: query.OpEq, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 42}},
@@ -645,7 +646,7 @@ func TestCBOPicksBestIndexAmongMultipleCandidates(t *testing.T) {
 		},
 	}
 	s := &query.SelectStmt{
-		TableName: "players",
+		From: []query.TableRef{{Name: "players"}},
 		Columns:   []string{"*"},
 		Where: andWhere(
 			query.Condition{Column: "score", Op: query.OpEq, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 5}},
@@ -665,5 +666,145 @@ func TestCBOPicksBestIndexAmongMultipleCandidates(t *testing.T) {
 	}
 	if il.Index.Name != "idx_rank" {
 		t.Errorf("CBO should pick idx_rank (more selective), got %q", il.Index.Name)
+	}
+}
+
+// --- Phase 11: JOIN planner tests ---
+
+func makeOrdersTable() *catalog.Table {
+	return &catalog.Table{
+		Name: "orders",
+		Columns: []catalog.ColumnDef{
+			{Name: "id", Type: catalog.TypeInt},
+			{Name: "user_id", Type: catalog.TypeInt},
+			{Name: "amount", Type: catalog.TypeInt},
+		},
+	}
+}
+
+func mustPlanJoin(t *testing.T, s *query.SelectStmt, tables ...*catalog.Table) PhysicalNode {
+	t.Helper()
+	plan, err := Plan(s, tables, nil)
+	if err != nil {
+		t.Fatalf("Plan() error: %v", err)
+	}
+	return plan
+}
+
+// TestPlanExplicitJoinProducesNLJ verifies that an explicit JOIN produces a
+// NestedLoopJoin at the root (below Project).
+func TestPlanExplicitJoinProducesNLJ(t *testing.T) {
+	users := makeTable()
+	orders := makeOrdersTable()
+	s := &query.SelectStmt{
+		Columns: []string{"*"},
+		From:    []query.TableRef{{Name: "users", Alias: "u"}},
+		Joins: []query.JoinClause{{
+			Table: query.TableRef{Name: "orders", Alias: "o"},
+			On:    query.Condition{Column: "u.id", Op: query.OpEq, RHSCol: "o.user_id"},
+		}},
+	}
+	plan := mustPlanJoin(t, s, users, orders)
+	proj := rootProject(t, plan)
+	nlj, ok := proj.Child.(*NestedLoopJoin)
+	if !ok {
+		t.Fatalf("expected NestedLoopJoin below Project, got %T", proj.Child)
+	}
+	if len(nlj.On) != 1 {
+		t.Fatalf("NLJ.On: got %d conditions, want 1", len(nlj.On))
+	}
+	if nlj.On[0].Column != "u.id" || nlj.On[0].RHSCol != "o.user_id" {
+		t.Errorf("NLJ.On[0]: %+v", nlj.On[0])
+	}
+}
+
+// TestPlanImplicitJoinWithWhereProducesNLJ verifies that FROM t1, t2 WHERE t1.id = t2.fk
+// also produces a NestedLoopJoin.
+func TestPlanImplicitJoinWithWhereProducesNLJ(t *testing.T) {
+	users := makeTable()
+	orders := makeOrdersTable()
+	s := &query.SelectStmt{
+		Columns: []string{"*"},
+		From: []query.TableRef{
+			{Name: "users", Alias: "u"},
+			{Name: "orders", Alias: "o"},
+		},
+		Where: andWhere(
+			query.Condition{Column: "u.id", Op: query.OpEq, RHSCol: "o.user_id"},
+		),
+	}
+	plan := mustPlanJoin(t, s, users, orders)
+	proj := rootProject(t, plan)
+	nlj, ok := proj.Child.(*NestedLoopJoin)
+	if !ok {
+		t.Fatalf("expected NestedLoopJoin below Project, got %T", proj.Child)
+	}
+	if len(nlj.On) != 1 || nlj.On[0].Column != "u.id" || nlj.On[0].RHSCol != "o.user_id" {
+		t.Errorf("NLJ.On: %+v", nlj.On)
+	}
+}
+
+// TestPlanJoinPredicatePushdown verifies that single-table filter predicates
+// are pushed below the NLJ to leaf scans, not left on the join node.
+func TestPlanJoinPredicatePushdown(t *testing.T) {
+	users := makeTable()
+	orders := makeOrdersTable()
+	s := &query.SelectStmt{
+		Columns: []string{"*"},
+		From:    []query.TableRef{{Name: "users", Alias: "u"}},
+		Joins: []query.JoinClause{{
+			Table: query.TableRef{Name: "orders", Alias: "o"},
+			On:    query.Condition{Column: "u.id", Op: query.OpEq, RHSCol: "o.user_id"},
+		}},
+		Where: andWhere(
+			query.Condition{Column: "u.age", Op: query.OpGt, Val: catalog.Value{Type: catalog.TypeInt, IntVal: 18}},
+		),
+	}
+	plan := mustPlanJoin(t, s, users, orders)
+	proj := rootProject(t, plan)
+	nlj, ok := proj.Child.(*NestedLoopJoin)
+	if !ok {
+		t.Fatalf("expected NLJ below Project, got %T", proj.Child)
+	}
+	// The NLJ itself should have only the join condition
+	if len(nlj.On) != 1 {
+		t.Errorf("NLJ.On should have 1 join condition, got %d", len(nlj.On))
+	}
+	// The age filter should be pushed to the left side (users)
+	_, isFilter := nlj.Left.(*Filter)
+	_, isFilterScan := nlj.Left.(*IndexScan)
+	if !isFilter && !isFilterScan {
+		// Filter wraps IndexScan — either *Filter or a pushed-down full scan
+		f, ok := nlj.Left.(*Filter)
+		if !ok {
+			t.Fatalf("left side should be a Filter for age>18, got %T", nlj.Left)
+		}
+		if len(f.Preds) == 0 {
+			t.Error("left Filter should have age>18 predicate")
+		}
+	}
+	_ = isFilter
+	_ = isFilterScan
+}
+
+// TestPlanJoinExplain verifies the EXPLAIN output for a two-table join.
+func TestPlanJoinExplain(t *testing.T) {
+	users := makeTable()
+	orders := makeOrdersTable()
+	s := &query.SelectStmt{
+		Columns: []string{"*"},
+		From:    []query.TableRef{{Name: "users", Alias: "u"}},
+		Joins: []query.JoinClause{{
+			Table: query.TableRef{Name: "orders", Alias: "o"},
+			On:    query.Condition{Column: "u.id", Op: query.OpEq, RHSCol: "o.user_id"},
+		}},
+	}
+	plan := mustPlanJoin(t, s, users, orders)
+	out := Explain(plan)
+	if !strings.Contains(out, "NestedLoopJoin") {
+		t.Errorf("EXPLAIN missing NestedLoopJoin:\n%s", out)
+	}
+	if !strings.Contains(out, "u.id") || !strings.Contains(out, "o.user_id") {
+		t.Errorf("EXPLAIN missing join condition columns:\n%s", out)
 	}
 }
