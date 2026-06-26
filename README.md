@@ -39,6 +39,7 @@ The result is a working database that can execute multi-table SQL queries, survi
 | 🔑 | **Secondary indexes** | Non-PK indexes, automatic index selection by query planner |
 | 🔄 | **MVCC concurrency** | Snapshot isolation, per-goroutine explicit transactions, concurrent readers/writers |
 | 🌐 | **Web dashboard** | Live SQL editor, schema browser, buffer pool stats, query history |
+| 🔌 | **TCP server** | Length-prefixed JSON wire protocol, concurrent connections, graceful shutdown |
 
 ---
 
@@ -89,8 +90,11 @@ db-engine/
 ├── stats/          Per-column cardinality statistics for the cost model
 ├── mvcc/           TxManager, Snapshot, xmin/xmax visibility rules
 ├── executor/       SQL dispatch, MVCC transactions, scan/index operators
+├── server/         TCP server, wire protocol (length-prefixed JSON frames)
+├── client/         TCP client library (Dial, Exec, Close)
 └── cmd/
     ├── dbengine/   Interactive SQL REPL (CLI)
+    ├── dbserver/   Standalone TCP server binary
     └── dashboard/  Web UI (HTTP server + single-page app)
 ```
 
@@ -242,6 +246,61 @@ Uncommitted writes that were in-flight at crash time leave no trace — the WAL 
 
 ---
 
+## TCP Server
+
+`db-engine` can run as a standalone TCP server. Any number of clients connect
+over the network and send SQL queries; responses come back as structured data.
+
+### Wire protocol
+
+Every message is a **length-prefixed JSON frame**:
+
+```
+[4 bytes: payload length, big-endian uint32][payload: UTF-8 JSON]
+```
+
+Client → Server:
+```json
+{"sql": "SELECT * FROM users WHERE id = 1"}
+```
+
+Server → Client (success):
+```json
+{"columns": ["id", "name"], "rows": [["1", "Alice"]], "message": ""}
+```
+
+Server → Client (error):
+```json
+{"error": "table \"users\" does not exist"}
+```
+
+### Start the server
+
+```sh
+go run ./cmd/dbserver -dir ./mydb -port 5433
+# db-engine listening on [::]:5433  (database: ./mydb)
+```
+
+### Connect with the client library
+
+```go
+import "github.com/yahya/db-engine/client"
+
+c, err := client.Dial("localhost:5433")
+if err != nil { log.Fatal(err) }
+defer c.Close()
+
+res, err := c.Exec("SELECT * FROM users")
+// res.Columns → ["id", "name"]
+// res.Rows    → [["1", "Alice"], ["2", "Bob"]]
+// res.Message → "" (non-empty for INSERT/CREATE)
+```
+
+Explicit transactions work correctly across multiple calls on the same
+connection — each connection goroutine owns its own MVCC transaction slot.
+
+---
+
 ## Roadmap
 
 | Phase | Status | Topic |
@@ -258,7 +317,7 @@ Uncommitted writes that were in-flight at crash time leave no trace — the WAL 
 | 10 | ✅ Done | Statistics — cardinality estimates, cost-based optimizer |
 | 11 | ✅ Done | JOIN — multi-table queries, nested-loop join, predicate pushdown |
 | 12 | ✅ Done | Concurrency — MVCC, snapshot isolation, concurrent readers/writers |
-| 13 | 📋 Planned | Network — TCP server, wire protocol |
+| 13 | ✅ Done | Network — TCP server, wire protocol |
 
 ---
 

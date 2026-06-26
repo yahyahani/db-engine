@@ -24,7 +24,7 @@ design decision in a real database engine exists, not just how to use one.
 | 10 | ✅ Done | Statistics — cardinality estimates, cost-based optimizer |
 | 11 | ✅ Done | JOIN — multi-table queries, nested-loop join, predicate pushdown |
 | 12 | ✅ Done | Concurrency — MVCC, multiple readers/writers |
-| 13 | 📋 Todo | Network — TCP server, wire protocol |
+| 13 | ✅ Done | Network — TCP server, wire protocol |
 
 ---
 
