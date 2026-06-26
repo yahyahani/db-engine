@@ -21,11 +21,14 @@ import (
 // We use a fixed size to keep encoding simple and predictable.
 // A real engine stores large values in overflow pages (heap tuples in PostgreSQL).
 //
-// Phase 12 breakdown:
-//   Bytes  0– 3: xmin  uint32 — MVCC insert XID (written by executor)
-//   Bytes  4– 7: xmax  uint32 — MVCC delete XID (0 = live row)
-//   Bytes  8–71: user columns (64 bytes — same capacity as before Phase 12)
-const ValueSize = 72
+// Layout (written by executor):
+//   Bytes   0–  3: xmin  uint32 — MVCC insert XID
+//   Bytes   4–  7: xmax  uint32 — MVCC delete XID (0 = live row)
+//   Bytes   8–255: user columns (248 bytes)
+//
+// 248 bytes of user data accommodates up to 5 TEXT columns (48 bytes each)
+// plus multiple INT columns (8 bytes each) per row.
+const ValueSize = 256
 
 // nodeHeaderSize is the bytes at the start of page.Data reserved for node metadata.
 //
@@ -50,11 +53,15 @@ const nodeHeaderSize = 8
 // 338^2 × 56 ≈ 6.4 million leaf entries with at most 3 page reads per lookup.
 const InternalOrder = 338
 
+// leafEntrySize is the bytes consumed by one leaf entry (key + value).
+const leafEntrySize = 8 + ValueSize // 8-byte uint64 key + ValueSize-byte value
+
 // LeafOrder is the maximum number of key-value entries in a leaf node.
+// Computed from ValueSize so the two constants stay in sync automatically.
 //
-// Per entry: 8 bytes (key) + 72 bytes (value) = 80 bytes
-//   nodeHeaderSize(8) + 80N ≤ DataSize(4072)  →  N ≤ 50
-const LeafOrder = 50
+//	nodeHeaderSize(8) + leafEntrySize*N ≤ DataSize(4072)
+//	N ≤ (4072 - 8) / leafEntrySize = 4064 / 264 = 15
+const LeafOrder = (4072 - nodeHeaderSize) / leafEntrySize
 
 // NodeType distinguishes internal routing pages from leaf data pages.
 type NodeType uint8

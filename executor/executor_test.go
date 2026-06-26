@@ -70,7 +70,9 @@ func TestCreateTableRowTooBig(t *testing.T) {
 	db, cleanup := tempDB(t)
 	defer cleanup()
 
-	if _, err := db.Exec("CREATE TABLE fat (id INT, a TEXT, b TEXT)"); err == nil {
+	// 1 INT (8 bytes) + 6 TEXT (6×48 = 288 bytes) = 296 bytes > 248 available
+	// (ValueSize 256 − 8-byte MVCC header).
+	if _, err := db.Exec("CREATE TABLE fat (id INT, a TEXT, b TEXT, c TEXT, d TEXT, e TEXT, f TEXT)"); err == nil {
 		t.Error("expected error: row exceeds btree.ValueSize")
 	}
 }
