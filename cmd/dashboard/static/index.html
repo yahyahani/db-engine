@@ -139,9 +139,12 @@ body {
 #bg-svg .bg-e.ll  { stroke-dasharray: 2.5 3; }
 #bg-svg .bg-e.fade { opacity: .55; }
 
-#bg-svg .bg-n { fill: var(--accent); }
+#bg-svg .bg-n      { fill: var(--accent); }
 #bg-svg .bg-n.leaf { fill: none; stroke: var(--accent); stroke-width: 1; }
 #bg-svg .bg-n.sub  { opacity: .5; }
+#bg-svg .bg-n.alt       { fill: var(--violet); }
+#bg-svg .bg-n.leaf.alt  { fill: none; stroke: var(--violet); stroke-width: 1; }
+#bg-svg .bg-e.alt       { stroke: var(--violet); stroke-width: .7; opacity: .7; }
 
 /* ── Glass ─────────────────────────────────────────────────────────────────── */
 .glass {
@@ -447,6 +450,19 @@ html[data-theme="light"] .toggle-thumb { left: 2px; }
 
 .stat-k { font-size: 10.5px; color: var(--text-3); }
 .stat-v { font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: var(--text-2); }
+.pk-icon { margin-left: 3px; font-size: 10px; vertical-align: middle; }
+.col-idx-badge {
+  font-size: 9px; font-weight: 600; font-family: 'JetBrains Mono', monospace;
+  padding: 0 4px; border-radius: 3px; margin-left: 3px; vertical-align: middle;
+  color: var(--violet); background: rgba(167,139,250,.1); border: 1px solid rgba(167,139,250,.22);
+}
+.analyze-hint {
+  width: 100%; margin-top: 5px; padding: 5px 10px; border-radius: 6px;
+  border: 1px dashed rgba(251,191,36,.3); background: rgba(251,191,36,.05);
+  color: var(--amber); font-size: 11px; cursor: pointer; text-align: center;
+  transition: background .15s, border-color .15s; font-family: 'Inter', sans-serif;
+}
+.analyze-hint:hover { background: rgba(251,191,36,.1); border-color: rgba(251,191,36,.5); }
 
 .sidebar-empty {
   padding: 24px 14px;
@@ -602,6 +618,33 @@ kbd {
   color: var(--text-2);
 }
 
+/* ── Query History ─────────────────────────────────────────────────────────── */
+.hist-bar {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 14px; border-top: 1px solid var(--glass-border);
+  cursor: pointer; transition: background .12s; flex-shrink: 0;
+  user-select: none;
+}
+.hist-bar:hover { background: var(--glass-hi); }
+.hist-bar-label { font-size: 10px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--text-3); }
+.hist-count {
+  font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-3);
+  background: var(--glass-hi); border: 1px solid var(--glass-border);
+  padding: 0 5px; border-radius: 8px; min-width: 18px; text-align: center;
+}
+.hist-chevron { margin-left: auto; color: var(--text-3); font-size: 11px; transition: transform .22s cubic-bezier(.4,0,.2,1); }
+.hist-bar.open .hist-chevron { transform: rotate(180deg); }
+.hist-panel { max-height: 0; overflow: hidden; transition: max-height .22s cubic-bezier(.4,0,.2,1); }
+.hist-panel.open { max-height: 140px; }
+.hist-list { overflow-y: auto; max-height: 140px; padding: 4px 6px 5px; }
+.hist-list::-webkit-scrollbar { width: 3px; }
+.hist-list::-webkit-scrollbar-thumb { background: var(--glass-border); border-radius: 2px; }
+.hist-item { display: flex; align-items: center; gap: 8px; padding: 3px 6px; border-radius: 5px; cursor: pointer; transition: background .1s; }
+.hist-item:hover { background: var(--glass-hi); }
+.hist-dot { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; }
+.hist-sql { flex: 1; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hist-meta { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-3); flex-shrink: 0; }
+
 /* ── Results panel ─────────────────────────────────────────────────────────── */
 .results-panel {
   flex: 1;
@@ -712,30 +755,36 @@ kbd {
 .msg-icon { font-size: 14px; flex-shrink: 0; margin-top: 1px; }
 .msg-text { word-break: break-word; line-height: 1.5; }
 
-/* ── Explain tree ──────────────────────────────────────────────────────────── */
-.explain-tree {
-  padding: 14px;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 12.5px;
-  animation: fadeIn .2s ease-out;
+/* ── Plan tree ─────────────────────────────────────────────────────────────── */
+.plan-tree { padding: 14px 16px; animation: fadeIn .2s ease-out; overflow: auto; }
+.plan-node-outer { position: relative; }
+.plan-node-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 0; cursor: default; position: relative;
 }
-.explain-node {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  padding: 3px 0;
+.plan-children {
+  margin-left: 18px; padding-left: 14px;
+  border-left: 1.5px solid var(--glass-border);
 }
-.explain-conn { color: var(--text-3); flex-shrink: 0; }
-.explain-badge {
-  font-weight: 600;
-  flex-shrink: 0;
-  padding: 1px 7px;
-  border-radius: 5px;
-  border: 1px solid;
-  font-size: 11.5px;
-  letter-spacing: -.01em;
+.plan-children > .plan-node-outer > .plan-node-row::before {
+  content: ''; position: absolute; left: -14px; top: 50%;
+  width: 14px; height: 1.5px; background: var(--glass-border);
 }
-.explain-rest { color: var(--text-2); }
+.plan-badge {
+  font-family: 'JetBrains Mono', monospace; font-weight: 600; font-size: 11.5px;
+  padding: 2px 8px; border-radius: 5px; border: 1px solid; flex-shrink: 0;
+  letter-spacing: -.01em; transition: box-shadow .15s, transform .1s;
+}
+.plan-node-row:hover .plan-badge { box-shadow: 0 0 10px currentColor; transform: translateY(-1px); }
+.plan-rest { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: var(--text-2); transition: color .12s; }
+.plan-node-row:hover .plan-rest { color: var(--text-1); }
+.plan-tip {
+  font-family: 'Inter', sans-serif; font-size: 12px; color: var(--text-1);
+  line-height: 1.55; background: var(--glass-solid); border: 1px solid var(--glass-border);
+  border-radius: 9px; padding: 10px 13px; box-shadow: 0 4px 24px rgba(0,0,0,.35);
+  white-space: pre-wrap; word-break: break-word; animation: fadeIn .1s ease-out;
+  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+}
 
 /* ── Multi-statement stack ─────────────────────────────────────────────────── */
 .multi-stack { animation: fadeIn .2s ease-out; }
@@ -821,20 +870,20 @@ kbd {
         <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
       </filter>
     </defs>
-    <!-- Large ambient glow nodes -->
+    <!-- Large ambient glow nodes — teal left, violet right -->
     <circle class="bg-n" cx="50" cy="-3" r="5.5" filter="url(#node-glow)" opacity=".6"/>
     <circle class="bg-n" cx="25" cy="12" r="4.5" filter="url(#node-glow)" opacity=".55"/>
-    <circle class="bg-n" cx="75" cy="12" r="4.5" filter="url(#node-glow)" opacity=".55"/>
-    <circle class="bg-n leaf" cx="6"  cy="52" r="5"   filter="url(#node-glow)" opacity=".45"/>
-    <circle class="bg-n leaf" cx="44" cy="52" r="5"   filter="url(#node-glow)" opacity=".45"/>
-    <circle class="bg-n leaf" cx="94" cy="52" r="5"   filter="url(#node-glow)" opacity=".45"/>
+    <circle class="bg-n alt" cx="75" cy="12" r="4.5" filter="url(#node-glow)" opacity=".5"/>
+    <circle class="bg-n leaf" cx="6"  cy="52" r="5" filter="url(#node-glow)" opacity=".45"/>
+    <circle class="bg-n leaf" cx="44" cy="52" r="5" filter="url(#node-glow)" opacity=".45"/>
+    <circle class="bg-n leaf alt" cx="94" cy="52" r="5" filter="url(#node-glow)" opacity=".42"/>
     <!-- Internal edges -->
     <line class="bg-e" x1="50" y1="-3" x2="25" y2="12"/>
     <line class="bg-e" x1="50" y1="-3" x2="75" y2="12"/>
     <line class="bg-e" x1="25" y1="12" x2="12" y2="30"/>
     <line class="bg-e" x1="25" y1="12" x2="38" y2="30"/>
-    <line class="bg-e" x1="75" y1="12" x2="62" y2="30"/>
-    <line class="bg-e" x1="75" y1="12" x2="88" y2="30"/>
+    <line class="bg-e alt" x1="75" y1="12" x2="62" y2="30"/>
+    <line class="bg-e alt" x1="75" y1="12" x2="88" y2="30"/>
     <line class="bg-e" x1="12" y1="30" x2="6"  y2="52"/>
     <line class="bg-e" x1="12" y1="30" x2="18" y2="52"/>
     <line class="bg-e" x1="38" y1="30" x2="32" y2="52"/>
@@ -873,8 +922,8 @@ kbd {
     <circle class="bg-n" cx="75" cy="12" r="2.7"/>
     <circle class="bg-n" cx="12" cy="30" r="2.2"/>
     <circle class="bg-n" cx="38" cy="30" r="2.2"/>
-    <circle class="bg-n" cx="62" cy="30" r="2.2"/>
-    <circle class="bg-n" cx="88" cy="30" r="2.2"/>
+    <circle class="bg-n alt" cx="62" cy="30" r="2.2"/>
+    <circle class="bg-n alt" cx="88" cy="30" r="2.2"/>
     <!-- Leaf nodes (hollow = B+ leaf pages) -->
     <circle class="bg-n leaf" cx="6"  cy="52" r="3"/>
     <circle class="bg-n leaf" cx="18" cy="52" r="3"/>
@@ -1003,6 +1052,15 @@ kbd {
         <div class="editor-hint">
           <kbd>⌘ Enter</kbd> <kbd>Ctrl Enter</kbd> to run
         </div>
+        <!-- Query History (collapsible strip) -->
+        <div class="hist-bar" id="hist-bar" onclick="toggleHistory()">
+          <span class="hist-bar-label">History</span>
+          <span class="hist-count" id="hist-count"></span>
+          <span class="hist-chevron">▾</span>
+        </div>
+        <div class="hist-panel" id="hist-panel">
+          <div class="hist-list" id="hist-list"></div>
+        </div>
       </div>
 
       <!-- Results -->
@@ -1042,16 +1100,20 @@ kbd {
 'use strict';
 
 // ── State ──────────────────────────────────────────────────────────────────
-let editor      = null;
-let allTables   = [];
-let activeTable = null;
-let darkMode    = true;
+let editor       = null;
+let allTables    = [];
+let activeTable  = null;
+let darkMode     = true;
+let histOpen     = false;
+let queryHistory = [];
+const HIST_KEY   = 'dbe_history';
 
 // ── Boot ───────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   initEditor();
   loadTables();
   loadPoolStats();
+  loadHistory();
   setInterval(loadPoolStats, 6000);
   document.getElementById('db-badge').textContent = window.location.host;
 });
@@ -1117,11 +1179,13 @@ function renderSidebar() {
   }
   list.innerHTML = allTables.map(t => {
     const active   = t.name === activeTable;
-    const rowCount = t.stats ? fmtNum(t.stats.rowCount) : '';
+    const rowCount = t.stats ? fmtNum(t.stats.rowCount) + 'r' : '';
+    // violet icon for indexed tables, accent for plain
+    const iconColor = (t.indexes && t.indexes.length > 0) ? 'var(--violet)' : 'var(--accent)';
     return `
       <div class="tbl-item${active ? ' active' : ''}" onclick="selectTable(${q(t.name)})">
         <div class="tbl-row">
-          <svg class="tbl-icon-svg" viewBox="0 0 14 14" fill="none">
+          <svg class="tbl-icon-svg" viewBox="0 0 14 14" fill="none" style="color:${iconColor}">
             <ellipse cx="7" cy="11" rx="5" ry="1.4" stroke="currentColor" stroke-width="1.1"/>
             <line x1="2" y1="6.5" x2="2" y2="11" stroke="currentColor" stroke-width="1.1"/>
             <line x1="12" y1="6.5" x2="12" y2="11" stroke="currentColor" stroke-width="1.1"/>
@@ -1139,47 +1203,76 @@ function renderSidebar() {
 }
 
 function renderDetails(t) {
-  const cols = t.columns.map(c => `
-    <div class="col-row">
-      <span class="col-n">${esc(c.name)}</span>
-      <span class="type-badge ${c.type}">${esc(c.type)}</span>
-    </div>`).join('');
+  // index lookup: column → [indexName, ...]
+  const idxMap = {};
+  for (const idx of (t.indexes || [])) {
+    if (!idxMap[idx.column]) idxMap[idx.column] = [];
+    idxMap[idx.column].push(idx.name);
+  }
+  // first INT column = primary key (engine convention)
+  const pkCol = ((t.columns || []).find(c => c.type === 'INT') || {}).name;
 
-  const idxs = t.indexes.length === 0 ? '' : `
+  const cols = (t.columns || []).map(c => {
+    const pk = c.name === pkCol
+      ? `<span class="pk-icon" title="Primary key">🔑</span>` : '';
+    const idxBadges = (idxMap[c.name] || []).map(n =>
+      `<span class="col-idx-badge" title="${esc(n)}">idx</span>`
+    ).join('');
+    return `<div class="col-row">
+      <span class="col-n">${esc(c.name)}${pk}${idxBadges}</span>
+      <span class="type-badge ${c.type}">${esc(c.type)}</span>
+    </div>`;
+  }).join('');
+
+  const idxs = (t.indexes || []).length === 0 ? '' : `
     <div class="detail-group">
       <div class="detail-head">Indexes</div>
       ${t.indexes.map(i => `
         <div class="idx-row">
           <span class="idx-n">${esc(i.name)}</span>
-          <span class="idx-col">→ ${esc(i.column)}</span>
+          <span class="idx-col" style="color:var(--violet)">→ ${esc(i.column)}</span>
         </div>`).join('')}
     </div>`;
 
-  const stats = !t.stats ? '' : `
-    <div class="detail-group">
-      <div class="detail-head">Statistics</div>
-      <div class="stat-row">
-        <span class="stat-k">rows</span>
-        <span class="stat-v">${fmtNum(t.stats.rowCount)}</span>
-      </div>
-      ${t.stats.columns.filter(c => c.nDistinct > 0).map(c => {
-        const range = (c.max > 0 && c.max !== c.min) ? ` [${c.min}–${c.max}]` : '';
-        return `<div class="stat-row">
-          <span class="stat-k">${esc(c.name)}</span>
-          <span class="stat-v">${fmtNum(c.nDistinct)} distinct${range}</span>
-        </div>`;
-      }).join('')}
-    </div>`;
+  const statsHtml = !t.stats
+    ? `<div class="detail-group">
+        <button class="analyze-hint" onclick="event.stopPropagation();analyzeTableByName(${q(t.name)})">
+          ∿ Run ANALYZE for statistics
+        </button>
+       </div>`
+    : `<div class="detail-group">
+        <div class="detail-head">Statistics</div>
+        <div class="stat-row">
+          <span class="stat-k">rows</span>
+          <span class="stat-v">${fmtNum(t.stats.rowCount)}</span>
+        </div>
+        ${(t.stats.columns || []).filter(c => c.nDistinct > 0).map(c => {
+          const range = (c.max > 0 && c.max !== c.min) ? ` [${c.min}–${c.max}]` : '';
+          return `<div class="stat-row">
+            <span class="stat-k">${esc(c.name)}</span>
+            <span class="stat-v">${fmtNum(c.nDistinct)} distinct${range}</span>
+          </div>`;
+        }).join('')}
+      </div>`;
 
-  return `
-    <div class="tbl-details">
-      <div class="detail-group">
-        <div class="detail-head">Columns</div>
-        ${cols}
-      </div>
-      ${idxs}
-      ${stats}
-    </div>`;
+  return `<div class="tbl-details">
+    <div class="detail-group">
+      <div class="detail-head">Columns</div>
+      ${cols}
+    </div>
+    ${idxs}
+    ${statsHtml}
+  </div>`;
+}
+
+async function analyzeTableByName(name) {
+  setRunning(true);
+  try {
+    const data = await apiPost('/api/query', { sql: `ANALYZE ${name}` });
+    const r = data.results && data.results[0];
+    if (r && r.error) setStatus(r.error, 'err');
+    else { setStatus((r && r.message) || 'ANALYZE complete', 'ok'); await loadTables(); }
+  } finally { setRunning(false); }
 }
 
 function selectTable(name) {
@@ -1200,9 +1293,13 @@ async function runQuery() {
   try {
     const data = await apiPost('/api/query', { sql });
     renderMulti(data);
+    const ok  = !data.results.some(r => r.error);
+    const dur = data.totalDuration || (data.results[0] && data.results[0].duration) || '';
+    addToHistory(sql, ok, dur);
     if (/\b(CREATE|DROP|ANALYZE)\b/i.test(sql)) await loadTables();
   } catch (e) {
     showError(e.message);
+    addToHistory(sql, false, '');
   } finally {
     setRunning(false);
   }
@@ -1219,6 +1316,8 @@ async function explainQuery() {
   try {
     const data = await apiPost('/api/query', { sql: 'EXPLAIN ' + first });
     renderMulti(data);
+    const dur = (data.results && data.results[0] && data.results[0].duration) || '';
+    addToHistory('EXPLAIN ' + first, 'explain', dur);
   } catch (e) {
     showError(e.message);
   } finally {
@@ -1228,15 +1327,7 @@ async function explainQuery() {
 
 async function analyzeTable() {
   if (!activeTable) return;
-  setRunning(true);
-  try {
-    const data = await apiPost('/api/query', { sql: `ANALYZE ${activeTable}` });
-    const r = data.results && data.results[0];
-    if (r && r.error) setStatus(r.error, 'err');
-    else { setStatus((r && r.message) || 'ANALYZE complete', 'ok'); await loadTables(); }
-  } finally {
-    setRunning(false);
-  }
+  await analyzeTableByName(activeTable);
 }
 
 function splitSQL(sql) {
@@ -1256,14 +1347,67 @@ function splitSQL(sql) {
   return stmts;
 }
 
+// ── History ────────────────────────────────────────────────────────────────
+function loadHistory() {
+  try { queryHistory = JSON.parse(localStorage.getItem(HIST_KEY) || '[]'); }
+  catch (_) { queryHistory = []; }
+  renderHistory();
+}
+
+function addToHistory(sql, ok, dur) {
+  queryHistory.unshift({ sql: sql.trim(), ok, dur, ts: Date.now() });
+  if (queryHistory.length > 20) queryHistory.length = 20;
+  localStorage.setItem(HIST_KEY, JSON.stringify(queryHistory));
+  renderHistory();
+}
+
+function renderHistory() {
+  const list  = document.getElementById('hist-list');
+  const count = document.getElementById('hist-count');
+  if (!list) return;
+  if (count) count.textContent = queryHistory.length ? String(queryHistory.length) : '';
+  if (queryHistory.length === 0) {
+    list.innerHTML = '<div style="padding:5px 6px;color:var(--text-3);font-size:11px">No queries yet</div>';
+    return;
+  }
+  list.innerHTML = queryHistory.map((e, i) => {
+    const dot  = e.ok === 'explain' ? 'var(--amber)' : e.ok ? 'var(--green)' : 'var(--red)';
+    const short = e.sql.length > 55 ? e.sql.slice(0, 55) + '…' : e.sql;
+    const d    = new Date(e.ts);
+    const time = d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0');
+    return `<div class="hist-item" onclick="histLoad(${i})" title="${esc(e.sql)}">
+      <span class="hist-dot" style="background:${dot}"></span>
+      <span class="hist-sql">${esc(short)}</span>
+      <span class="hist-meta">${esc(e.dur)}</span>
+      <span class="hist-meta" style="min-width:30px;text-align:right;opacity:.5">${time}</span>
+    </div>`;
+  }).join('');
+}
+
+function histLoad(i) {
+  const e = queryHistory[i];
+  if (!e) return;
+  editor.setValue(e.sql);
+  const last = editor.lineCount() - 1;
+  editor.setCursor({ line: last, ch: editor.getLine(last).length });
+  editor.focus();
+}
+
+function toggleHistory() {
+  histOpen = !histOpen;
+  document.getElementById('hist-panel').classList.toggle('open', histOpen);
+  document.getElementById('hist-bar').classList.toggle('open', histOpen);
+}
+
 // ── Rendering ──────────────────────────────────────────────────────────────
-const NODE_COLORS = {
-  Project:     'var(--text-2)',
-  Filter:      'var(--amber)',
-  Limit:       'var(--cyan)',
-  IndexScan:   'var(--accent)',
-  IndexLookup: 'var(--violet)',
-  Union:       'var(--green)',
+const NODE_CFG = {
+  Project:        { color: 'var(--text-2)',  bg: 'rgba(136,144,176,.12)' },
+  Filter:         { color: 'var(--amber)',   bg: 'rgba(251,191,36,.08)'  },
+  Limit:          { color: 'var(--cyan)',    bg: 'rgba(56,189,248,.08)'  },
+  IndexScan:      { color: 'var(--accent)',  bg: 'rgba(20,184,166,.08)'  },
+  IndexLookup:    { color: 'var(--violet)',  bg: 'rgba(167,139,250,.08)' },
+  Union:          { color: 'var(--green)',   bg: 'rgba(52,211,153,.08)'  },
+  NestedLoopJoin: { color: '#818cf8',        bg: 'rgba(99,102,241,.08)'  },
 };
 
 function renderMulti(data) {
@@ -1353,7 +1497,7 @@ function buildCard(r, idx) {
 }
 
 function looksLikeExplain(msg) {
-  return /\b(Project|IndexScan|IndexLookup|Filter|Limit|Union)\b/.test(msg);
+  return /\b(Project|IndexScan|IndexLookup|Filter|Limit|Union|NestedLoopJoin)\b/.test(msg);
 }
 
 function renderTable(cols, rows) {
@@ -1374,27 +1518,83 @@ function renderTable(cols, rows) {
   </div>`;
 }
 
-function renderExplain(text) {
+// ── Plan tree ─────────────────────────────────────────────────────────────
+function parseExplainTree(text) {
   const lines = text.split('\n').filter(l => l.trim());
-  const nodes = lines.map(line => {
-    const indent = line.length - line.trimStart().length;
-    const m = line.trim().match(/^(\S+)(.*)/);
-    if (!m) return null;
-    return { depth: Math.floor(indent/2), type: m[1], rest: m[2].trim() };
-  }).filter(Boolean);
+  const flat = lines.map(line => {
+    const spaces  = line.length - line.trimStart().length;
+    const trimmed = line.trimStart();
+    const si      = trimmed.search(/\s/);
+    const type    = si === -1 ? trimmed : trimmed.slice(0, si);
+    const rest    = si === -1 ? '' : trimmed.slice(si).trim();
+    return { depth: Math.floor(spaces / 2), type, rest, children: [] };
+  });
+  const roots = [], stack = [];
+  for (const node of flat) {
+    while (stack.length && stack[stack.length-1].depth >= node.depth) stack.pop();
+    (stack.length ? stack[stack.length-1].node.children : roots).push(node);
+    stack.push({ node, depth: node.depth });
+  }
+  return roots;
+}
 
-  const html = nodes.map(n => {
-    const color = NODE_COLORS[n.type] || 'var(--text-1)';
-    const conn  = n.depth > 0 ? `<span class="explain-conn">└─</span>` : '';
-    return `<div class="explain-node" style="padding-left:${n.depth*22}px">
-      ${conn}
-      <span class="explain-badge" style="color:${color};border-color:${color}2e">${esc(n.type)}</span>
-      <span class="explain-rest">${esc(n.rest)}</span>
+function renderExplain(text) {
+  return `<div class="plan-tree">${renderTreeNodes(parseExplainTree(text))}</div>`;
+}
+
+function renderTreeNodes(nodes) {
+  return nodes.map(node => {
+    const cfg  = NODE_CFG[node.type] || { color: 'var(--text-1)', bg: 'var(--glass-hi)' };
+    const tip  = nodeTooltip(node.type, node.rest);
+    const badge = `<span class="plan-badge"
+      style="color:${cfg.color};border-color:${cfg.color}30;background:${cfg.bg}"
+      onmouseenter="showTip(event,${q(tip)})" onmouseleave="hideTip()"
+    >${esc(node.type)}</span>`;
+    const rest     = node.rest ? `<span class="plan-rest">${esc(node.rest)}</span>` : '';
+    const children = node.children.length
+      ? `<div class="plan-children">${renderTreeNodes(node.children)}</div>` : '';
+    return `<div class="plan-node-outer">
+      <div class="plan-node-row">${badge}${rest}</div>
+      ${children}
     </div>`;
   }).join('');
-
-  return `<div class="explain-tree">${html}</div>`;
 }
+
+function nodeTooltip(type, rest) {
+  const tips = {
+    Project:        'Output projection\nSelects and reorders the output columns.',
+    Filter:         'Row filter\nEvaluates predicates; discards non-matching rows.',
+    Limit:          'Early stop\nShort-circuits scan — avoids reading unneeded pages.',
+    IndexScan:      'B-Tree scan\nReads pages in primary-key order.\nCheap for range and point lookups.',
+    IndexLookup:    'Secondary index\n2 B-Tree lookups per row:\n  1. index entry → primary key\n  2. primary key → full row\nEfficient only when very selective.',
+    Union:          'OR-branch merge\nCombines multiple index scans.\nDeduplicates results by primary key.',
+    NestedLoopJoin: 'Nested-loop join\nComplexity: O(|left| × |right|) I/Os.\nFor each left row, scans the entire right child.',
+  };
+  const base = tips[type] || type;
+  return rest ? base + '\n\n' + rest : base;
+}
+
+let _tipEl = null;
+function getTipEl() {
+  if (!_tipEl) {
+    _tipEl = document.createElement('div');
+    _tipEl.className = 'plan-tip';
+    _tipEl.style.cssText = 'position:fixed;display:none;pointer-events:none;z-index:500';
+    document.body.appendChild(_tipEl);
+  }
+  return _tipEl;
+}
+function showTip(e, text) {
+  const t = getTipEl();
+  t.textContent = text;
+  t.style.display = 'block';
+  const pad = 14, w = Math.min(320, window.innerWidth - 20);
+  let x = e.clientX + pad, y = e.clientY + pad;
+  if (x + w + 10 > window.innerWidth) x = e.clientX - w - pad;
+  if (y + t.offsetHeight + 10 > window.innerHeight) y = e.clientY - t.offsetHeight - pad;
+  t.style.cssText += `;left:${x}px;top:${y}px;max-width:${w}px`;
+}
+function hideTip() { if (_tipEl) _tipEl.style.display = 'none'; }
 
 function msgBox(type, icon, text) {
   return `<div class="msg-box ${type}">
