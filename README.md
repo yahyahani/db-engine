@@ -1,20 +1,6 @@
 <div align="center">
 
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 56 56" width="80" height="80" fill="none">
-  <defs>
-    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#fb7185"/>
-      <stop offset="100%" stop-color="#fb923c"/>
-    </linearGradient>
-  </defs>
-  <ellipse cx="28" cy="42" rx="18" ry="5.2" fill="url(#g)" opacity=".35"/>
-  <rect x="10" y="14" width="36" height="28" fill="url(#g)" opacity=".18"/>
-  <line x1="10" y1="14" x2="10" y2="42" stroke="url(#g)" stroke-width="3"/>
-  <line x1="46" y1="14" x2="46" y2="42" stroke="url(#g)" stroke-width="3"/>
-  <ellipse cx="28" cy="28" rx="18" ry="5.2" fill="url(#g)" opacity=".3"/>
-  <ellipse cx="28" cy="14" rx="18" ry="5.2" fill="url(#g)" opacity=".85"/>
-  <ellipse cx="28" cy="14" rx="10" ry="2.6" fill="white" opacity=".18"/>
-</svg>
+<img src="assets/logo.svg" width="80" height="80" alt="db-engine logo"/>
 
 # db-engine
 

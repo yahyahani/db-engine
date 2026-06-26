@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80" width="80" height="80" fill="none">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#fb7185"/>
+      <stop offset="100%" stop-color="#fb923c"/>
+    </linearGradient>
+  </defs>
+  <!-- bottom disk -->
+  <ellipse cx="40" cy="62" rx="26" ry="7.5" fill="url(#g)" opacity=".35"/>
+  <!-- cylinder walls -->
+  <rect x="14" y="20" width="52" height="42" fill="url(#g)" opacity=".18"/>
+  <line x1="14" y1="20" x2="14" y2="62" stroke="url(#g)" stroke-width="4" stroke-linecap="round"/>
+  <line x1="66" y1="20" x2="66" y2="62" stroke="url(#g)" stroke-width="4" stroke-linecap="round"/>
+  <!-- middle shelf -->
+  <ellipse cx="40" cy="41" rx="26" ry="7.5" fill="url(#g)" opacity=".30"/>
+  <!-- top disk — brightest -->
+  <ellipse cx="40" cy="20" rx="26" ry="7.5" fill="url(#g)" opacity=".85"/>
+  <!-- specular highlight -->
+  <ellipse cx="40" cy="20" rx="14" ry="3.7" fill="white" opacity=".20"/>
+</svg>
