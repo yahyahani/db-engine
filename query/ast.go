@@ -24,9 +24,20 @@ type Condition struct {
 	Val    catalog.Value
 }
 
-// WhereClause holds one or more conditions combined by AND.
+// WhereClause is a boolean formula in Disjunctive Normal Form (OR of ANDs).
+//
+// Each element of Groups is a set of AND-combined conditions.
+// Groups themselves are OR-combined at the top level.
+//
+// Examples:
+//   WHERE a=1 AND b=2        →  Groups: [[a=1, b=2]]
+//   WHERE a=1 OR  a=5        →  Groups: [[a=1], [a=5]]
+//   WHERE a>0 AND b=1 OR c=3 →  Groups: [[a>0, b=1], [c=3]]  (AND binds tighter)
+//
+// A single-group WhereClause is equivalent to the old AND-only form; all
+// existing code paths that previously used where.Conds now use where.Groups[0].
 type WhereClause struct {
-	Conds []Condition
+	Groups [][]Condition // outer = OR, inner = AND
 }
 
 // Statement is implemented by all supported SQL statement types.

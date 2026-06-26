@@ -64,6 +64,16 @@ func buildOp(node planner.PhysicalNode, ps pager.PageStore, tbl *catalog.Table) 
 			return nil, err
 		}
 		return &projectOp{child: child, colIdxs: n.ColIdxs}, nil
+	case *planner.Union:
+		children := make([]Operator, len(n.Children))
+		for i, child := range n.Children {
+			op, err := buildOp(child, ps, tbl)
+			if err != nil {
+				return nil, err
+			}
+			children[i] = op
+		}
+		return &unionOp{children: children, pkIdx: n.PkIdx}, nil
 	default:
 		return nil, fmt.Errorf("executor: unknown plan node %T", node)
 	}
@@ -96,15 +106,18 @@ func execute(plan planner.PhysicalNode, ps pager.PageStore, tbl *catalog.Table) 
 
 // --- scanOp ---
 
-// scanOp reads rows from the B-Tree within the bounds specified by the IndexScan
-// node.  It pre-fetches the matching entries in Open() (the B-Tree currently
-// only supports bulk range scans, not lazy cursors; Phase 7 adds cursors).
+// scanOp reads rows lazily from the B-Tree using a Cursor.
+//
+// Why a cursor instead of bulk RangeScan (as in Phase 6)?
+//   A cursor reads one leaf page at a time and stops the instant the caller
+//   stops calling Next().  For LIMIT 3 on a million-row table, only
+//   O(log n + 3) pages are ever loaded instead of all million rows.
+//   The cursor is opened in Open() and followed in each Next() call.
 type scanOp struct {
-	node    *planner.IndexScan
-	ps      pager.PageStore
-	tbl     *catalog.Table
-	entries []btree.Entry
-	pos     int
+	node   *planner.IndexScan
+	ps     pager.PageStore
+	tbl    *catalog.Table
+	cursor *btree.Cursor
 }
 
 func (s *scanOp) Open() error {
@@ -112,24 +125,89 @@ func (s *scanOp) Open() error {
 	if err != nil {
 		return fmt.Errorf("scanOp: open B-Tree: %w", err)
 	}
-	s.entries, err = bt.RangeScan(s.node.MinKey, s.node.MaxKey)
+	s.cursor, err = bt.NewCursor(s.node.MinKey, s.node.MaxKey)
 	if err != nil {
-		return fmt.Errorf("scanOp: range scan: %w", err)
+		return fmt.Errorf("scanOp: new cursor: %w", err)
 	}
-	s.pos = 0
 	return nil
 }
 
 func (s *scanOp) Next() ([]catalog.Value, bool, error) {
-	if s.pos >= len(s.entries) {
-		return nil, false, nil
+	e, ok, err := s.cursor.Next()
+	if !ok || err != nil {
+		return nil, ok, err
 	}
-	row := decodeRow(s.tbl, s.entries[s.pos].Value)
-	s.pos++
-	return row, true, nil
+	return decodeRow(s.tbl, e.Value), true, nil
 }
 
-func (s *scanOp) Close() error { return nil }
+func (s *scanOp) Close() error {
+	if s.cursor != nil {
+		return s.cursor.Close()
+	}
+	return nil
+}
+
+// --- unionOp ---
+
+// unionOp merges the row streams from multiple child operators, emitting each
+// unique primary-key row exactly once.
+//
+// Why deduplication is necessary:
+//   With OR conditions such as "id > 10 OR name='Alice'", a row with id=11
+//   AND name='Alice' matches both branches.  Without the seen map it would
+//   appear twice in the output.  The seen map tracks uint64 PK values, which
+//   is cheap: one map lookup and one write per row.
+//
+// Ordering: rows are emitted in the order they appear across children (branch
+// 0 first, then branch 1, etc.).  Within one branch, rows are in B-Tree key
+// order (ascending PK).
+type unionOp struct {
+	children []Operator
+	pkIdx    int         // column index of the primary key in the full row
+	cur      int         // index of the child currently being drained
+	seen     map[uint64]bool
+}
+
+func (u *unionOp) Open() error {
+	u.seen = make(map[uint64]bool)
+	u.cur = 0
+	for _, child := range u.children {
+		if err := child.Open(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (u *unionOp) Next() ([]catalog.Value, bool, error) {
+	for u.cur < len(u.children) {
+		row, ok, err := u.children[u.cur].Next()
+		if err != nil {
+			return nil, false, err
+		}
+		if !ok {
+			u.cur++
+			continue
+		}
+		pk := row[u.pkIdx].IntVal
+		if u.seen[pk] {
+			continue // duplicate — skip and pull from the same child again
+		}
+		u.seen[pk] = true
+		return row, true, nil
+	}
+	return nil, false, nil
+}
+
+func (u *unionOp) Close() error {
+	var first error
+	for _, child := range u.children {
+		if err := child.Close(); err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
+}
 
 // --- filterOp ---
 

@@ -11,16 +11,16 @@ import (
 
 // Plan builds a physical plan for a SELECT statement.
 //
-// The algorithm is rule-based (no cost estimates):
+// Algorithm (rule-based, no cost estimates):
 //
-//  1. Classify every WHERE condition:
-//     - Conditions on the primary key column with an INT literal are pushed
-//       into the IndexScan bounds — they narrow the B-Tree range without
-//       loading non-matching rows from disk at all.
-//     - All other conditions become a Filter node above the scan.
+//  1. For each OR group in the WHERE clause call classifyGroup, which splits
+//     conditions into IndexScan key bounds and post-filter predicates.
 //
-//  2. Assemble the plan bottom-up:
-//     IndexScan → [Filter] → [Limit] → Project
+//  2. If there is only one OR group: plan = IndexScan → [Filter].
+//     If there are multiple OR groups:  plan = Union{ branch per group }.
+//     Each branch is: IndexScan → [Filter].
+//
+//  3. Wrap with [Limit] → Project (always outermost).
 //
 // Column names in s.Columns are validated against tbl before planning; an
 // error is returned if an unknown column is referenced.
@@ -30,12 +30,33 @@ func Plan(s *query.SelectStmt, tbl *catalog.Table) (PhysicalNode, error) {
 		return nil, err
 	}
 
-	minKey, maxKey, postPreds := classifyPredicates(tbl, s.Where)
+	pkIdx := tbl.PrimaryKeyIndex()
 
-	var root PhysicalNode = &IndexScan{Table: tbl, MinKey: minKey, MaxKey: maxKey}
+	// Build one sub-plan branch per OR group.
+	var branches []PhysicalNode
+	if s.Where == nil {
+		// No WHERE — full scan.
+		branches = []PhysicalNode{&IndexScan{Table: tbl, MinKey: 0, MaxKey: math.MaxUint64}}
+	} else {
+		for _, group := range s.Where.Groups {
+			minKey, maxKey, post := classifyGroup(tbl, group)
+			var branch PhysicalNode = &IndexScan{Table: tbl, MinKey: minKey, MaxKey: maxKey}
+			if len(post) > 0 {
+				branch = &Filter{Child: branch, Preds: post}
+			}
+			branches = append(branches, branch)
+		}
+	}
 
-	if len(postPreds) > 0 {
-		root = &Filter{Child: root, Preds: postPreds}
+	var root PhysicalNode
+	if len(branches) == 1 {
+		root = branches[0]
+	} else {
+		// Multiple OR groups — merge with deduplication.
+		if pkIdx < 0 {
+			return nil, fmt.Errorf("planner: OR queries require a primary key column")
+		}
+		root = &Union{Children: branches, PkIdx: pkIdx}
 	}
 
 	if s.Limit > 0 {
@@ -45,32 +66,22 @@ func Plan(s *query.SelectStmt, tbl *catalog.Table) (PhysicalNode, error) {
 	return &Project{Child: root, Columns: cols, ColIdxs: idxs}, nil
 }
 
-// classifyPredicates splits WHERE conditions into two groups:
+// classifyGroup splits one AND group of conditions into a key range for
+// IndexScan and any remaining predicates for a Filter node.
 //
-//   - PK conditions (INT comparisons on the primary key column) are used to
-//     compute the tightest [minKey, maxKey] for the IndexScan.
-//   - All other conditions are returned as post-predicates for a Filter node.
-//
-// Intersecting multiple PK conditions tightens the range: e.g.
-//
-//	id > 5 AND id < 20  →  [6, 19]
-//	id = 7              →  [7, 7]   (point lookup)
-//	id > 5 AND id < 3   →  [1, 0]  (impossible range, scan returns nothing)
-func classifyPredicates(tbl *catalog.Table, where *query.WhereClause) (minKey, maxKey uint64, post []query.Condition) {
+// PK INT conditions tighten the range; all other conditions become post-preds.
+// Intersecting PK bounds: id>5 AND id<20 → [6,19]; impossible → [1,0].
+func classifyGroup(tbl *catalog.Table, conds []query.Condition) (minKey, maxKey uint64, post []query.Condition) {
 	minKey, maxKey = 0, math.MaxUint64
-	if where == nil {
-		return
-	}
 	pkIdx := tbl.PrimaryKeyIndex()
 	if pkIdx < 0 {
-		post = where.Conds
+		post = conds
 		return
 	}
 	pkName := strings.ToLower(tbl.Columns[pkIdx].Name)
 
-	for _, cond := range where.Conds {
+	for _, cond := range conds {
 		if strings.ToLower(cond.Column) != pkName || cond.Val.Type != catalog.TypeInt {
-			// Non-PK or non-integer condition: cannot be expressed as a key range.
 			post = append(post, cond)
 			continue
 		}

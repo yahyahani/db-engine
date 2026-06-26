@@ -82,6 +82,22 @@ type Limit struct {
 	N     int
 }
 
+// Union merges the row streams from two or more sub-plans and deduplicates by
+// primary-key value.  It is emitted when a WHERE clause has multiple OR groups
+// that map to disjoint IndexScan ranges — each group becomes one child.
+//
+// Why deduplication is required:
+//   An OR condition such as "id > 10 OR name = 'Alice'" might match the same row
+//   in both branches (e.g. a row with id=11 AND name='Alice').  Without
+//   deduplication, that row would appear twice in the result.  Union tracks the
+//   primary-key value of every row it has yielded and skips duplicates.
+//
+// PkIdx is the column index of the primary key in the full (pre-Project) row.
+type Union struct {
+	Children []PhysicalNode
+	PkIdx    int
+}
+
 // --- EXPLAIN ---
 
 // Explain returns a human-readable representation of the plan tree, one line
@@ -126,6 +142,13 @@ func (p *Project) explainLines(depth int, lines *[]string) {
 func (l *Limit) explainLines(depth int, lines *[]string) {
 	*lines = append(*lines, fmt.Sprintf("%sLimit  %d", indent(depth), l.N))
 	l.Child.explainLines(depth+1, lines)
+}
+
+func (u *Union) explainLines(depth int, lines *[]string) {
+	*lines = append(*lines, fmt.Sprintf("%sUnion  (%d branches, dedup by pk)", indent(depth), len(u.Children)))
+	for _, child := range u.Children {
+		child.explainLines(depth+1, lines)
+	}
 }
 
 func indent(depth int) string { return strings.Repeat("  ", depth) }

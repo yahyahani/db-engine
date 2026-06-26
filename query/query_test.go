@@ -175,10 +175,10 @@ func TestParseSelectWhereEq(t *testing.T) {
 		t.Fatalf("Parse: %v", err)
 	}
 	sel := stmt.(*SelectStmt)
-	if sel.Where == nil || len(sel.Where.Conds) != 1 {
+	if sel.Where == nil || len(sel.Where.Groups) != 1 || len(sel.Where.Groups[0]) != 1 {
 		t.Fatalf("WHERE: %v", sel.Where)
 	}
-	c := sel.Where.Conds[0]
+	c := sel.Where.Groups[0][0]
 	if c.Column != "id" || c.Op != OpEq || c.Val.IntVal != 5 {
 		t.Errorf("condition: %+v", c)
 	}
@@ -190,11 +190,11 @@ func TestParseSelectWhereAnd(t *testing.T) {
 		t.Fatalf("Parse: %v", err)
 	}
 	sel := stmt.(*SelectStmt)
-	if len(sel.Where.Conds) != 2 {
-		t.Fatalf("expected 2 conditions, got %d", len(sel.Where.Conds))
+	if len(sel.Where.Groups) != 1 || len(sel.Where.Groups[0]) != 2 {
+		t.Fatalf("expected 1 group with 2 conditions, got %+v", sel.Where.Groups)
 	}
-	if sel.Where.Conds[0].Op != OpGte || sel.Where.Conds[1].Op != OpLte {
-		t.Errorf("ops: %v %v", sel.Where.Conds[0].Op, sel.Where.Conds[1].Op)
+	if sel.Where.Groups[0][0].Op != OpGte || sel.Where.Groups[0][1].Op != OpLte {
+		t.Errorf("ops: %v %v", sel.Where.Groups[0][0].Op, sel.Where.Groups[0][1].Op)
 	}
 }
 
@@ -204,9 +204,44 @@ func TestParseSelectWhereText(t *testing.T) {
 		t.Fatalf("Parse: %v", err)
 	}
 	sel := stmt.(*SelectStmt)
-	c := sel.Where.Conds[0]
+	c := sel.Where.Groups[0][0]
 	if c.Val.Type != catalog.TypeText || c.Val.TextVal != "Bob" {
 		t.Errorf("text condition: %+v", c.Val)
+	}
+}
+
+func TestParseSelectWhereOR(t *testing.T) {
+	stmt, err := Parse("SELECT * FROM users WHERE id < 3 OR id > 8")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	sel := stmt.(*SelectStmt)
+	if len(sel.Where.Groups) != 2 {
+		t.Fatalf("expected 2 OR groups, got %d: %+v", len(sel.Where.Groups), sel.Where.Groups)
+	}
+	if sel.Where.Groups[0][0].Op != OpLt {
+		t.Errorf("group 0: expected OpLt, got %v", sel.Where.Groups[0][0].Op)
+	}
+	if sel.Where.Groups[1][0].Op != OpGt {
+		t.Errorf("group 1: expected OpGt, got %v", sel.Where.Groups[1][0].Op)
+	}
+}
+
+func TestParseSelectWhereANDinOR(t *testing.T) {
+	// AND binds tighter than OR: "a AND b OR c" = "(a AND b) OR (c)"
+	stmt, err := Parse("SELECT * FROM t WHERE id > 5 AND id < 8 OR id = 2")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	sel := stmt.(*SelectStmt)
+	if len(sel.Where.Groups) != 2 {
+		t.Fatalf("expected 2 OR groups, got %d", len(sel.Where.Groups))
+	}
+	if len(sel.Where.Groups[0]) != 2 {
+		t.Errorf("group 0: expected 2 AND conditions, got %d", len(sel.Where.Groups[0]))
+	}
+	if len(sel.Where.Groups[1]) != 1 {
+		t.Errorf("group 1: expected 1 condition, got %d", len(sel.Where.Groups[1]))
 	}
 }
 

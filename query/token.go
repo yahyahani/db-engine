@@ -24,6 +24,7 @@ const (
 	TokRollback
 	TokExplain // EXPLAIN
 	TokLimit   // LIMIT
+	TokOr      // OR
 
 	// Literals
 	TokIdent  // unquoted identifier: table name, column name

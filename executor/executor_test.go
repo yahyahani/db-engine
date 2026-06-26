@@ -491,6 +491,87 @@ func TestExplainWithLimit(t *testing.T) {
 	}
 }
 
+// --- OR conditions ---
+
+// setupUsersN creates a users table (id INT, name TEXT, age INT) and inserts
+// rows 1..n with name="user<id>" and age=id.
+func setupUsersN(t *testing.T, db *DB, n int) {
+	t.Helper()
+	mustExec(t, db, "CREATE TABLE users (id INT, name TEXT, age INT)")
+	for i := 1; i <= n; i++ {
+		mustExec(t, db, fmt.Sprintf("INSERT INTO users VALUES (%d, 'user%d', %d)", i, i, i))
+	}
+}
+
+// TestORTwoPKRanges verifies that WHERE id < 3 OR id > 8 returns rows from
+// both ranges without duplicates (rows 1,2,9,10 for a 10-row table).
+func TestORTwoPKRanges(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+	setupUsersN(t, db, 10)
+
+	res := mustExec(t, db, "SELECT id FROM users WHERE id < 3 OR id > 8")
+	if len(res.Rows) != 4 {
+		t.Fatalf("expected 4 rows (1,2,9,10), got %d: %v", len(res.Rows), res.Rows)
+	}
+}
+
+// TestORNoOverlap verifies that non-overlapping OR ranges return the correct
+// combined count.
+func TestORNoOverlap(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+	setupUsersN(t, db, 20)
+
+	res := mustExec(t, db, "SELECT id FROM users WHERE id <= 5 OR id >= 16")
+	// Expected: 1,2,3,4,5,16,17,18,19,20 = 10 rows
+	if len(res.Rows) != 10 {
+		t.Fatalf("expected 10 rows, got %d", len(res.Rows))
+	}
+}
+
+// TestOROverlapDedup verifies that an overlapping OR (id > 5 AND age > 5
+// covers the same rows) does not return duplicates.  All rows 6..10 satisfy
+// both branches since age==id in our test data.
+func TestOROverlapDedup(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+	setupUsersN(t, db, 10)
+
+	// Both "id > 7" and "id > 7" are identical — every matching row would be a
+	// duplicate without deduplication.
+	res := mustExec(t, db, "SELECT id FROM users WHERE id > 7 OR id > 7")
+	// Expected: 8,9,10 = 3 rows (not 6)
+	if len(res.Rows) != 3 {
+		t.Fatalf("expected 3 unique rows, got %d: %v", len(res.Rows), res.Rows)
+	}
+}
+
+// TestORWithAND verifies that AND inside an OR group is evaluated correctly.
+// WHERE (id > 5 AND id < 8) OR id = 2  should return rows 2, 6, 7.
+func TestORWithAND(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+	setupUsersN(t, db, 10)
+
+	res := mustExec(t, db, "SELECT id FROM users WHERE id > 5 AND id < 8 OR id = 2")
+	if len(res.Rows) != 3 {
+		t.Fatalf("expected 3 rows (2,6,7), got %d: %v", len(res.Rows), res.Rows)
+	}
+}
+
+// TestExplainORPlan verifies that EXPLAIN shows a Union node for OR queries.
+func TestExplainORPlan(t *testing.T) {
+	db, cleanup := tempDB(t)
+	defer cleanup()
+	mustExec(t, db, "CREATE TABLE t (id INT, v TEXT)")
+
+	res := mustExec(t, db, "EXPLAIN SELECT * FROM t WHERE id < 5 OR id > 90")
+	if !contains(res.Message, "Union") {
+		t.Errorf("expected 'Union' in EXPLAIN output:\n%s", res.Message)
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr ||
 		len(s) > 0 && func() bool {

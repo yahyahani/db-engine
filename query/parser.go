@@ -232,21 +232,45 @@ func (p *parser) parseExplain() (*ExplainStmt, error) {
 	return &ExplainStmt{Inner: inner}, nil
 }
 
+// parseWhere parses a WHERE clause into DNF (Disjunctive Normal Form).
+//
+// Grammar (AND binds tighter than OR, matching standard SQL precedence):
+//
+//	whereClause = andGroup ( OR andGroup )*
+//	andGroup    = condition ( AND condition )*
 func (p *parser) parseWhere() (*WhereClause, error) {
-	cond, err := p.parseCondition()
+	group, err := p.parseAndGroup()
 	if err != nil {
 		return nil, fmt.Errorf("WHERE: %w", err)
 	}
-	conds := []Condition{cond}
+	groups := [][]Condition{group}
+	for p.peek().Kind == TokOr {
+		p.consume()
+		group, err := p.parseAndGroup()
+		if err != nil {
+			return nil, fmt.Errorf("WHERE OR: %w", err)
+		}
+		groups = append(groups, group)
+	}
+	return &WhereClause{Groups: groups}, nil
+}
+
+// parseAndGroup parses one AND-combined group of conditions.
+func (p *parser) parseAndGroup() ([]Condition, error) {
+	cond, err := p.parseCondition()
+	if err != nil {
+		return nil, err
+	}
+	group := []Condition{cond}
 	for p.peek().Kind == TokAnd {
 		p.consume()
 		cond, err := p.parseCondition()
 		if err != nil {
-			return nil, fmt.Errorf("WHERE AND: %w", err)
+			return nil, fmt.Errorf("AND: %w", err)
 		}
-		conds = append(conds, cond)
+		group = append(group, cond)
 	}
-	return &WhereClause{Conds: conds}, nil
+	return group, nil
 }
 
 func (p *parser) parseCondition() (Condition, error) {
