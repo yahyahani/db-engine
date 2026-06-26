@@ -39,6 +39,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/yahya/db-engine/btree"
@@ -744,4 +745,18 @@ func (db *DB) tablePath(name string) string {
 
 func (db *DB) indexPath(name string) string {
 	return filepath.Join(db.dir, strings.ToLower(name)+".idx")
+}
+
+// Tables returns all tables in the catalog, sorted alphabetically by name.
+func (db *DB) Tables() []*catalog.Table {
+	tables := db.catalog.Tables()
+	sort.Slice(tables, func(i, j int) bool {
+		return strings.ToLower(tables[i].Name) < strings.ToLower(tables[j].Name)
+	})
+	return tables
+}
+
+// TableStats returns collected statistics for the named table, if available.
+func (db *DB) TableStats(name string) (*stats.TableStats, bool) {
+	return db.statsDB.Get(name)
 }
