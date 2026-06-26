@@ -1,5 +1,6 @@
 # Compiled binaries
 /dbengine
+/dashboard
 *.exe
 *.exe~
 *.dll
@@ -13,8 +14,13 @@
 # Database files created during testing or demo
 *.db
 
+# Runtime data directories (created by demo/docker)
+/data/
+/mydb/
+
 # Go toolchain cache
 /vendor/
 
 # macOS
 .DS_Store
+.claude/

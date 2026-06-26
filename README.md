@@ -1,222 +1,281 @@
+<div align="center">
+
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 56 56" width="80" height="80" fill="none">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#fb7185"/>
+      <stop offset="100%" stop-color="#fb923c"/>
+    </linearGradient>
+  </defs>
+  <ellipse cx="28" cy="42" rx="18" ry="5.2" fill="url(#g)" opacity=".35"/>
+  <rect x="10" y="14" width="36" height="28" fill="url(#g)" opacity=".18"/>
+  <line x1="10" y1="14" x2="10" y2="42" stroke="url(#g)" stroke-width="3"/>
+  <line x1="46" y1="14" x2="46" y2="42" stroke="url(#g)" stroke-width="3"/>
+  <ellipse cx="28" cy="28" rx="18" ry="5.2" fill="url(#g)" opacity=".3"/>
+  <ellipse cx="28" cy="14" rx="18" ry="5.2" fill="url(#g)" opacity=".85"/>
+  <ellipse cx="28" cy="14" rx="10" ry="2.6" fill="white" opacity=".18"/>
+</svg>
+
 # db-engine
 
-A database engine built from scratch in Go, one phase at a time.
-No external database libraries — only the Go standard library.
+**A relational database engine built from scratch in Go**
+
+[![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?style=flat&logo=go)](https://golang.org)
+[![License](https://img.shields.io/badge/License-MIT-green?style=flat)](LICENSE)
+[![Build](https://img.shields.io/badge/build-passing-brightgreen?style=flat)](#getting-started)
+[![Tests](https://img.shields.io/badge/tests-236%20passing-brightgreen?style=flat)](#running-the-tests)
+
+</div>
 
 ---
 
-## Phases
+## What is this?
 
-| Phase | Status | Topic |
-|-------|--------|-------|
-| **1** | ✅ done | Storage engine — pages, disk I/O, free list |
-| 2 | planned | B-Tree indexing |
-| 3 | planned | Query parser + executor (mini-SQL) |
-| 4 | planned | Transactions — WAL, concurrency control |
-| 5 | planned | Networking — TCP server |
-| 6 | planned | Buffer pool, caching |
+`db-engine` is a fully functional relational database engine written in pure Go — no external database libraries, only the standard library.
+
+It was built phase by phase to understand *why* every design decision in a real database exists: why pages are 4 KiB, why B-Trees are the default index structure, why a write-ahead log is necessary for crash safety, and why MVCC is the right answer to concurrent reads and writes.
+
+The result is a working database that can execute multi-table SQL queries, survive crashes, serve concurrent goroutines safely, and display live statistics in a web dashboard.
 
 ---
 
-## Phase 1 — Storage Engine
+## Features
 
-### What is a page?
-
-Every real database (PostgreSQL, MySQL, SQLite) reads and writes data in
-fixed-size **pages** — never one byte, never one row at a time. A page is the
-atomic unit of I/O.
-
-```
-Database file
-┌─────────────┬─────────────┬─────────────┬─────────────┐
-│   Page 0    │   Page 1    │   Page 2    │   Page N    │
-│ (meta page) │  data page  │  data page  │   ...       │
-└─────────────┴─────────────┴─────────────┴─────────────┘
- offset 0      offset 4096   offset 8192   offset N×4096
-```
-
-Seeking to page N is O(1): `file.Seek(N × PageSize, 0)`. No scanning, no
-linked-list traversal — just arithmetic.
-
-### Why 4 KiB pages?
-
-- **OS alignment**: Linux and macOS manage virtual memory in 4 KiB pages. One
-  database page = one OS memory page = one TLB entry. No padding overhead.
-- **Disk sectors**: Most SSDs and HDDs have 4 KiB physical sectors. Writing
-  less than 4 KiB gets padded to 4 KiB anyway; we might as well own the unit.
-- **Industry standard**: PostgreSQL and SQLite default to 4–8 KiB. It is the
-  sweet spot between wasted space (too large) and per-record metadata overhead
-  (too small).
-
-### Page layout
-
-Every page is exactly **4096 bytes**, split into a fixed header and a data area:
-
-```
-┌──────────────────────────────────────────┐  offset 0
-│             Header  (24 bytes)           │
-│                                          │
-│  Magic          [0–3]   0xDB110011       │  ← detect wrong files
-│  PageID         [4–7]   uint32           │
-│  PageType       [8]     uint8            │  free=0 / meta=1 / data=2
-│  Flags          [9]     uint8            │  reserved
-│  FreeSpaceOffset[10–11] uint16           │  first free byte in Data
-│  NumCells       [12–13] uint16           │  records written so far
-│  (reserved)     [14–15]                  │
-│  Checksum       [16–19] uint32 (CRC32)   │  ← detect silent corruption
-│  LSN            [20–23] uint32           │  for Phase 4 WAL
-├──────────────────────────────────────────┤  offset 24
-│                                          │
-│           Data area  (4072 bytes)        │
-│                                          │
-│  Payload bytes written here sequentially │
-│  FreeSpaceOffset advances with each write│
-│                                          │
-└──────────────────────────────────────────┘  offset 4096
-```
-
-**Little-endian byte order** throughout: x86 and ARM are natively
-little-endian, so no per-field byte-swap on every read/write.
-
-**CRC32 checksum** covers only the data area (bytes 24–4095). Covering the
-header would be circular (the checksum field is in the header). Silent data
-corruption ("bit rot") is a real failure mode on spinning disks and low-end
-SSDs.
-
-### The Pager
-
-The `pager` package owns all file I/O. Nothing above it ever calls
-`ReadAt`/`WriteAt` directly.
-
-**Page 0 — the meta page** stores two things:
-
-```
-Meta page data area:
-  bytes 0–3   TotalPages  uint32
-  bytes 4–7   FreeCount   uint32
-  bytes 8+    FreePageIDs []uint32  (FreeCount entries)
-```
-
-**Free list** — when you free a page, its ID goes into the free list. The next
-`AllocatePage` pops from the list instead of extending the file. This prevents
-the file from growing monotonically even when pages are recycled frequently.
-PostgreSQL calls its version of this the Free Space Map (FSM).
-
-**Crash safety** in Phase 1: the pager flushes the meta page after every
-`AllocatePage` and `FreePage`. This means a crash between two operations leaves
-the meta page consistent with the last completed operation. Full atomicity
-(so that partial writes are also safe) is the job of Phase 4's Write-Ahead Log.
+| | Feature | Details |
+|---|---|---|
+| 💾 | **Storage engine** | Fixed 4 KiB pages, CRC32 checksums, free-page recycling |
+| 🌳 | **B+ Tree indexing** | Ordered key/value store, cursor-based range scans, lazy leaf traversal |
+| 📝 | **SQL parser** | `SELECT`, `INSERT`, `CREATE TABLE`, `WHERE`, `ORDER BY`, `LIMIT`, `JOIN` |
+| 🔒 | **WAL & crash recovery** | Write-ahead log, no-steal/force policy, REDO-only recovery |
+| ♻️ | **Buffer pool** | Shared LRU page cache, pool hit/miss statistics |
+| 📊 | **Cost-based optimizer** | Column statistics, cardinality estimates, index vs. full-scan selection |
+| 🔗 | **JOIN support** | Multi-table queries, nested-loop join, predicate pushdown |
+| 🔑 | **Secondary indexes** | Non-PK indexes, automatic index selection by query planner |
+| 🔄 | **MVCC concurrency** | Snapshot isolation, per-goroutine explicit transactions, concurrent readers/writers |
+| 🌐 | **Web dashboard** | Live SQL editor, schema browser, buffer pool stats, query history |
 
 ---
 
-## Project structure
+## Architecture
+
+The engine is organized as a strict layer stack. Each layer only depends on the one below it.
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                     Web Dashboard                        │
+│              cmd/dashboard  (HTTP + JSON API)            │
+├──────────────────────────────────────────────────────────┤
+│                      Executor                            │
+│   SQL dispatch · MVCC · transactions · operators         │
+├────────────────────┬─────────────────────────────────────┤
+│      Planner       │            WAL                      │
+│  cost-based plans  │  write-ahead log · crash recovery   │
+├────────────────────┴─────────────────────────────────────┤
+│                     Query / Catalog                      │
+│         SQL parser · AST · schema definitions            │
+├──────────────────────────────────────────────────────────┤
+│                      B+ Tree                             │
+│         node encoding · cursor · insert / lookup         │
+├──────────────────────────────────────────────────────────┤
+│                    Buffer Pool                           │
+│              LRU cache · page eviction                   │
+├──────────────────────────────────────────────────────────┤
+│                      Pager                               │
+│        page I/O · TxPager (no-steal buffering)           │
+├──────────────────────────────────────────────────────────┤
+│                     Storage                              │
+│       4 KiB pages · CRC32 · free list · disk I/O         │
+└──────────────────────────────────────────────────────────┘
+```
+
+### Package overview
 
 ```
 db-engine/
-├── storage/
-│   ├── page.go          Page struct, Encode, Decode, CRC32
-│   └── page_test.go
-├── pager/
-│   ├── pager.go         Pager: Open, Close, AllocatePage, FreePage, ReadPage, WritePage
-│   └── pager_test.go
-├── cmd/
-│   └── dbengine/
-│       └── main.go      CLI demo
-├── go.mod
-└── README.md
+├── storage/        4 KiB page layout, CRC32 checksums, encode/decode
+├── pager/          File I/O, page allocation, TxPager (no-steal write buffer)
+├── bufferpool/     Shared LRU page cache across all open tables
+├── btree/          B+ Tree: nodes, cursor, insert, point lookup, range scan
+├── wal/            Write-ahead log: Begin/Write/Commit/Rollback records, Recover
+├── catalog/        Table and column definitions, schema serialisation
+├── query/          SQL lexer, parser, AST nodes
+├── planner/        Physical plan generation, cost estimation, EXPLAIN
+├── stats/          Per-column cardinality statistics for the cost model
+├── mvcc/           TxManager, Snapshot, xmin/xmax visibility rules
+├── executor/       SQL dispatch, MVCC transactions, scan/index operators
+└── cmd/
+    ├── dbengine/   Interactive SQL REPL (CLI)
+    └── dashboard/  Web UI (HTTP server + single-page app)
 ```
 
 ---
 
-## Getting started
+## Getting Started
 
 ### Prerequisites
 
+- **Go 1.22+** — `brew install go` (macOS) or [go.dev/dl](https://go.dev/dl)
+- **Docker** — only needed for the dashboard
+
+### Clone & build
+
 ```sh
-brew install go   # macOS — requires Go 1.22+
+git clone https://github.com/yahyahani/db-engine.git
+cd db-engine
+go build ./...
 ```
 
-### Run the tests
+### Running the tests
 
 ```sh
 go test ./...
 ```
 
-Expected output:
+Expected output (236 tests, all packages):
 
 ```
-ok  github.com/yahya/db-engine/storage   0.XXXs
-ok  github.com/yahya/db-engine/pager     0.XXXs
+ok  github.com/yahya/db-engine/btree
+ok  github.com/yahya/db-engine/bufferpool
+ok  github.com/yahya/db-engine/catalog
+ok  github.com/yahya/db-engine/executor
+ok  github.com/yahya/db-engine/pager
+ok  github.com/yahya/db-engine/planner
+ok  github.com/yahya/db-engine/query
+ok  github.com/yahya/db-engine/stats
+ok  github.com/yahya/db-engine/storage
+ok  github.com/yahya/db-engine/wal
 ```
 
-### Build the CLI
+To run with the race detector:
 
 ```sh
-go build -o dbengine ./cmd/dbengine
+go test -race ./...
 ```
 
-### Demo session — proves persistence
-
-The key guarantee of Phase 1: data written to a page must survive a program
-restart. Run these commands one by one and watch the page survive the process
-boundary.
+### Interactive SQL REPL
 
 ```sh
-# Create a new database file
-./dbengine init mydb.db
+go run ./cmd/dbengine -dir ./mydb
+```
 
-# Inspect the empty file (only the meta page exists)
-./dbengine info mydb.db
-
-# Allocate a data page — should print "allocated page ID: 1"
-./dbengine alloc mydb.db
-
-# Write something into page 1
-./dbengine write mydb.db 1 "Hello, persistent world!"
-
-# Read it back in the same process
-./dbengine read mydb.db 1
-
-# --- simulate a restart: the process exits here ---
-
-# Open the file fresh (new process) and read the same page
-./dbengine read mydb.db 1
-# → data: "Hello, persistent world!"   ← still there!
-
-# Allocate a second page, write, then free the first
-./dbengine alloc  mydb.db          # → ID 2
-./dbengine write  mydb.db 2 "second page"
-./dbengine free   mydb.db 1
-
-# The next alloc reuses page 1 instead of growing the file
-./dbengine alloc  mydb.db          # → ID 1  (recycled)
-./dbengine info   mydb.db          # free list is empty again
+```sql
+db> CREATE TABLE users (id INT, name TEXT, age INT);
+db> INSERT INTO users VALUES (1, 'Alice', 30);
+db> INSERT INTO users VALUES (2, 'Bob', 25);
+db> SELECT * FROM users WHERE age > 20;
+db> SELECT u.name, o.amount FROM users u JOIN orders o ON u.id = o.user_id;
+db> EXPLAIN SELECT * FROM users WHERE id = 1;
+db> BEGIN;
+db> INSERT INTO users VALUES (3, 'Carol', 28);
+db> COMMIT;
+db> .exit
 ```
 
 ---
 
-## Design decisions & concepts
+## Web Dashboard
 
-| Decision | Why |
-|----------|-----|
-| Fixed 4 KiB pages | OS/disk alignment, O(1) seek, industry standard |
-| Page 0 always meta | Always know where global state lives without scanning |
-| Little-endian binary | Native byte order on x86/ARM; no per-field swap |
-| CRC32 per page | Detect silent corruption before returning stale data |
-| Free list in meta page | O(1) recycle; no file growth for short-lived pages |
-| Magic number 0xDB110011 | Reject non-database files and detect partial init |
-| LSN field (unused) | Reserved slot for Phase 4 Write-Ahead Log |
+The dashboard is a single-page web app that connects to a running `db-engine` instance and lets you interact with it visually.
+
+### Start with Docker
+
+```sh
+./start.sh
+```
+
+This builds the image, starts the container on an available port, and prints the URL:
+
+```
+  ┌──────────────────────────────────────────┐
+  │  db-engine dashboard                     │
+  │  → http://localhost:54321                │
+  │                                          │
+  │  Database files: ./data/                 │
+  │  Stop:  docker compose down              │
+  │  Logs:  docker compose logs -f dashboard │
+  └──────────────────────────────────────────┘
+```
+
+### Or build and run directly
+
+```sh
+go run ./cmd/dashboard -dir ./data -port 8080
+# → http://localhost:8080
+```
+
+### Dashboard features
+
+- **SQL editor** with syntax highlighting (CodeMirror), `Cmd+Enter` / `Ctrl+Enter` to run
+- **Results table** — paginated, monospace, alternating rows
+- **EXPLAIN** button — shows the physical query plan for any `SELECT`
+- **Schema browser** — sidebar lists all tables with column types and primary keys
+- **Buffer pool badge** — live cache hit/miss counter, refreshes every 6 seconds
+- **Query history** — last 20 queries stored in `localStorage`, click to re-run
+- **Light / dark theme** toggle
 
 ---
 
-## What's next — Phase 2: B-Tree
+## Transactions & MVCC
 
-Phase 1 gives us raw page read/write. Phase 2 will add structure:
+`db-engine` implements snapshot isolation using multi-version concurrency control (MVCC), the same approach used by PostgreSQL and CockroachDB.
 
-- **Slotted page layout**: variable-length records with a slot directory at the
-  front of the page and records growing from the back. This allows O(1) insert
-  by slot index and efficient space reclamation on delete.
-- **B-Tree node pages**: internal nodes (keys + child page IDs) and leaf nodes
-  (keys + record data). A tree of depth 3 can index ~16 million records with
-  only 3 page reads per lookup.
-- **Key comparison and tree traversal**: insert, lookup, and range scan.
+Every row stores an 8-byte MVCC header (xmin + xmax). Readers take a snapshot of committed transaction IDs at `BEGIN` and only see rows whose `xmin` is in that snapshot. Writers never block readers.
+
+```sql
+-- Goroutine A
+BEGIN;
+INSERT INTO accounts VALUES (1, 1000);
+-- snapshot frozen here — goroutine B cannot see this row yet
+
+-- Goroutine B (concurrent auto-commit)
+SELECT * FROM accounts;  -- returns 0 rows: A not yet committed
+
+-- Goroutine A
+COMMIT;
+
+-- Goroutine B
+SELECT * FROM accounts;  -- now returns 1 row
+```
+
+Explicit transactions are per-goroutine: each goroutine that calls `BEGIN` gets its own isolated transaction state. Auto-commit operations on other goroutines are completely independent.
+
+---
+
+## Crash Recovery
+
+The write-ahead log (WAL) guarantees durability. The `TxPager` enforces a **no-steal** policy: uncommitted pages never reach the data files. Only after `COMMIT` are pages flushed.
+
+```
+Crash scenario:
+  1. INSERT committed → WAL has Begin + Write + Commit records (synced)
+  2. Process killed before data-file flush
+  3. On reopen: Recover() replays the committed Write records → data restored
+```
+
+Uncommitted writes that were in-flight at crash time leave no trace — the WAL has no `COMMIT` for them and `TxPager` never wrote to disk.
+
+---
+
+## Roadmap
+
+| Phase | Status | Topic |
+|------:|--------|-------|
+| 1 | ✅ Done | Storage engine — pages, disk I/O, free list |
+| 2 | ✅ Done | B+ Tree — ordered key/value index |
+| 3 | ✅ Done | SQL — parser, catalog, REPL |
+| 4 | ✅ Done | Transactions — WAL, commit, rollback, crash recovery |
+| 5 | ✅ Done | Buffer pool — shared LRU page cache |
+| 6 | ✅ Done | Query planner — physical plans, Volcano iterators, EXPLAIN |
+| 7 | ✅ Done | B-Tree cursor — lazy leaf traversal, OR conditions, Union node |
+| 8 | ✅ Done | Transaction integration — crash recovery tests, no-steal verification |
+| 9 | ✅ Done | Secondary indexes — non-PK indexes, index selection |
+| 10 | ✅ Done | Statistics — cardinality estimates, cost-based optimizer |
+| 11 | ✅ Done | JOIN — multi-table queries, nested-loop join, predicate pushdown |
+| 12 | ✅ Done | Concurrency — MVCC, snapshot isolation, concurrent readers/writers |
+| 13 | 📋 Planned | Network — TCP server, wire protocol |
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE) for details.
