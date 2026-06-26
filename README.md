@@ -9,7 +9,7 @@
 [![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?style=flat&logo=go)](https://golang.org)
 [![License](https://img.shields.io/badge/License-MIT-green?style=flat)](LICENSE)
 [![Build](https://img.shields.io/badge/build-passing-brightgreen?style=flat)](#getting-started)
-[![Tests](https://img.shields.io/badge/tests-236%20passing-brightgreen?style=flat)](#running-the-tests)
+[![Tests](https://img.shields.io/badge/tests-288%20passing-brightgreen?style=flat)](#running-the-tests)
 
 </div>
 
@@ -123,7 +123,7 @@ go build ./...
 go test ./...
 ```
 
-Expected output (236 tests, all packages):
+Expected output (288 tests, all packages):
 
 ```
 ok  github.com/yahya/db-engine/btree
@@ -154,13 +154,16 @@ go run ./cmd/dbengine -dir ./mydb
 db> CREATE TABLE users (id INT, name TEXT, age INT);
 db> INSERT INTO users VALUES (1, 'Alice', 30);
 db> INSERT INTO users VALUES (2, 'Bob', 25);
-db> SELECT * FROM users WHERE age > 20;
+db> INSERT INTO users VALUES (3, 'Carol', 35);
+db> SELECT * FROM users WHERE age > 20 ORDER BY age DESC;
 db> UPDATE users SET age = 31 WHERE id = 1;
 db> DELETE FROM users WHERE id = 2;
+db> SELECT COUNT(*), AVG(age), MIN(age), MAX(age) FROM users;
+db> SELECT name, age FROM users ORDER BY age ASC LIMIT 2;
 db> SELECT u.name, o.amount FROM users u JOIN orders o ON u.id = o.user_id;
 db> EXPLAIN SELECT * FROM users WHERE id = 1;
 db> BEGIN;
-db> INSERT INTO users VALUES (3, 'Carol', 28);
+db> INSERT INTO users VALUES (4, 'Dave', 22);
 db> COMMIT;
 db> .exit
 ```
@@ -322,6 +325,8 @@ connection — each connection goroutine owns its own MVCC transaction slot.
 | 11 | ✅ Done | JOIN — multi-table queries, nested-loop join, predicate pushdown |
 | 12 | ✅ Done | Concurrency — MVCC, snapshot isolation, concurrent readers/writers |
 | 13 | ✅ Done | Network — TCP server, wire protocol |
+| 14 | ✅ Done | DML — DELETE and UPDATE |
+| 15 | ✅ Done | Aggregates — COUNT/SUM/AVG/MIN/MAX, GROUP BY, HAVING, ORDER BY |
 
 ---
 
