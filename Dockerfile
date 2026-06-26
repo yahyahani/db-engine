@@ -3,8 +3,8 @@ FROM golang:1.22-alpine AS builder
 
 WORKDIR /src
 
-# Cache dependency downloads separately from source changes.
-COPY go.mod go.sum ./
+# No external dependencies — only go.mod exists (no go.sum).
+COPY go.mod ./
 RUN go mod download
 
 # Copy source and build a static binary.
