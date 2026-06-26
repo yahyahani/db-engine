@@ -18,12 +18,13 @@ design decision in a real database engine exists, not just how to use one.
 | 4 | ✅ Done | Transactions — WAL, commit, rollback, crash recovery |
 | 5 | ✅ Done | Buffer pool — shared LRU page cache |
 | 6 | ✅ Done | Query planner — physical plans, Volcano iterators, EXPLAIN |
-| 7 | 📋 Todo | B-Tree cursor — lazy leaf traversal, OR conditions |
-| 8 | 📋 Todo | Secondary indexes — non-PK indexes, index selection |
-| 9 | 📋 Todo | Statistics — cardinality estimates, cost-based optimizer |
-| 10 | 📋 Todo | JOIN — multi-table queries, hash join |
-| 11 | 📋 Todo | Concurrency — MVCC, multiple readers/writers |
-| 12 | 📋 Todo | Network — TCP server, wire protocol |
+| 7 | ✅ Done | B-Tree cursor — lazy leaf traversal, OR conditions, Union node |
+| 8 | ✅ Done | Transaction integration — crash recovery tests, no-steal verification |
+| 9 | 📋 Todo | Secondary indexes — non-PK indexes, index selection |
+| 10 | 📋 Todo | Statistics — cardinality estimates, cost-based optimizer |
+| 11 | 📋 Todo | JOIN — multi-table queries, hash join |
+| 12 | 📋 Todo | Concurrency — MVCC, multiple readers/writers |
+| 13 | 📋 Todo | Network — TCP server, wire protocol |
 
 ---
 
@@ -215,22 +216,71 @@ EXPLAIN SELECT * FROM users WHERE id = 42;
 
 ---
 
-## Planned phases
+---
 
 ### Phase 7 — B-Tree cursor and OR conditions
 
-Currently `bt.RangeScan(min, max)` loads all matching entries into a slice
-before returning. A **cursor** would expose `SeekTo(key)` and `Next()` so the
-scan is truly lazy — the executor pulls one page at a time and `LIMIT` can stop
-mid-page without loading the rest of the tree.
+**Packages:** `btree/cursor.go`, `query/`, `planner/`, `executor/operators.go`
 
-OR conditions (`WHERE id = 1 OR id = 5`) require multiple cursor scans merged
-with a union node. The planner would emit a `Union` node above two `IndexScan`
-nodes instead of falling back to a full table scan.
+Replaces the bulk `RangeScan` with a lazy cursor and extends SQL with OR.
+
+**Cursor** (`btree/cursor.go`) — `NewCursor(min, max)` seeks the first leaf in
+O(log n); each `Next()` returns the next entry in O(1) amortised by following
+the `NextLeaf` linked-list chain. For `LIMIT 3` this means only ~log n + 1 pages
+are ever loaded, not the entire tree.
+
+**OR in WHERE clause** — the WHERE clause is now in DNF (Disjunctive Normal
+Form): `Groups [][]Condition` where the outer slice is OR-combined and the
+inner slice is AND-combined. AND binds tighter than OR (standard SQL).
+
+**Union plan node** — when multiple OR groups each produce an `IndexScan`, the
+planner emits a `Union` node that merges the streams and deduplicates rows by
+primary key (via `map[uint64]bool`). A row that satisfies two OR branches only
+appears once in the result.
+
+**`scanOp` migrated to cursor** — the executor's scan operator now uses
+`btree.Cursor` instead of a pre-loaded slice, so lazy evaluation flows from
+`LIMIT` all the way to disk I/O.
+
+New SQL syntax:
+```sql
+SELECT * FROM users WHERE id < 3 OR id > 90;
+SELECT id FROM users WHERE id > 5 AND id < 8 OR id = 2;
+```
 
 ---
 
-### Phase 8 — Secondary indexes
+### Phase 8 — Transaction integration and crash recovery tests
+
+**Package:** `executor/` (new `txn_test.go`, `recovery_test.go`)
+
+Verifies the ACID properties built in Phases 4 and 5 through end-to-end tests
+that combine the executor, WAL, TxPager, and buffer pool layers.
+
+**Crash simulation strategy:**
+
+- *Post-commit data loss*: after a successful auto-commit, page 2 (the B-Tree
+  root leaf) is zeroed in the data file to simulate "WAL synced, flush
+  interrupted". Reopening the DB runs `Recover()` which replays the committed
+  WAL record and restores the page.
+- *Mid-transaction crash*: `crashSimulate()` closes file handles without
+  appending Commit or Rollback. TxPager's no-steal policy guarantees the data
+  file was never modified, so recovery has nothing to apply and the table
+  remains empty.
+
+**What is tested:**
+- `TestCrashRecoveryAfterCommit` — WAL replay restores zeroed data pages
+- `TestNoStealPolicyOnCrash` — uncommitted pages never reach disk
+- `TestRecoveryPartialCommit` — committed + in-flight crash → only committed rows visible
+- `TestRecoveryIsIdempotent` — replaying the WAL twice produces the same state
+- `TestWALRecordCountMatchesOperations` — Begin/Write/Commit per auto-commit insert
+- Explicit transaction tests: atomicity (ROLLBACK), read-your-own-writes, double-BEGIN error
+
+---
+
+## Planned phases
+
+### Phase 9 — Secondary indexes
 
 The B-Tree currently indexes only the primary key (first INT column). A
 secondary index stores `(indexed-column-value → primary-key)` in its own B-Tree
@@ -242,7 +292,7 @@ for each condition.
 
 ---
 
-### Phase 9 — Statistics and cost-based optimizer
+### Phase 10 — Statistics and cost-based optimizer
 
 The current planner is rule-based: it always pushes PK conditions into the index
 and post-filters the rest. It cannot compare the cost of different plans.
@@ -255,7 +305,7 @@ cause most rows to be discarded anyway.
 
 ---
 
-### Phase 10 — JOIN and multi-table queries
+### Phase 11 — JOIN and multi-table queries
 
 Extends the SQL parser and planner to support `FROM t1, t2 WHERE t1.id = t2.fk`
 and explicit `JOIN` syntax. The planner emits a `Join` node (nested-loop join or
@@ -265,7 +315,7 @@ and pairs matching rows.
 
 ---
 
-### Phase 11 — Concurrency
+### Phase 12 — Concurrency
 
 Allows multiple goroutines (or later, connections) to read and write
 concurrently without corrupting each other's view of the data.
@@ -278,7 +328,7 @@ never block writers and vice versa.
 
 ---
 
-### Phase 12 — Network protocol
+### Phase 13 — Network protocol
 
 Turns the in-process `DB.Exec()` API into a TCP server that clients connect to
 over a socket. Includes a simple request/response wire protocol, connection
