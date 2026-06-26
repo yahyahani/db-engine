@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>db-engine</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'><ellipse cx='12' cy='5' rx='9' ry='2.8' fill='%2314b8a6' opacity='.9'/><path d='M3 5v5.5c0 1.55 4.03 2.8 9 2.8s9-1.25 9-2.8V5' stroke='%2314b8a6' stroke-width='1.4'/><path d='M3 10.5V16c0 1.55 4.03 2.8 9 2.8s9-1.25 9-2.8v-5.5' stroke='%2314b8a6' stroke-width='1.4'/><ellipse cx='12' cy='16' rx='9' ry='2.8' fill='%2314b8a6' opacity='.3'/></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0%25' stop-color='%23fb7185'/><stop offset='100%25' stop-color='%23fb923c'/></linearGradient></defs><rect x='2' y='2' width='20' height='20' rx='5' fill='url(%23g)'/><line x1='7' y1='9' x2='17' y2='9' stroke='white' stroke-width='1.8' stroke-linecap='round'/><line x1='7' y1='12' x2='17' y2='12' stroke='white' stroke-width='1.8' stroke-linecap='round'/><line x1='7' y1='15' x2='13' y2='15' stroke='white' stroke-width='1.8' stroke-linecap='round'/></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -14,13 +14,15 @@
 <style>
 /* ── Accent gradient (constant in both modes) ───────────────────────────── */
 :root {
-  --grad:    linear-gradient(135deg, #fb7185 0%, #fb923c 100%);
-  /* Sidebar is always dark — light-mode values */
-  --sb-bg:            #18181b;
+  --grad:       linear-gradient(135deg, #fb7185 0%, #fb923c 100%);
+  --grad-shine: linear-gradient(135deg, rgba(255,255,255,.18) 0%, rgba(255,255,255,0) 55%);
+  /* Sidebar is always dark — light-mode values (warm dark, not cold black) */
+  --sb-bg:            #1a1416;
+  --sb-bg-grad:       linear-gradient(180deg, #201719 0%, #160f11 100%);
   --sb-text-1:        #f4f4f5;
   --sb-text-2:        #a1a1aa;
   --sb-text-3:        #52525b;
-  --sb-border:        rgba(255,255,255,.08);
+  --sb-border:        rgba(255,255,255,.07);
   --sb-item-hover:    rgba(255,255,255,.06);
   --sb-item-active:   rgba(251,113,133,.14);
   --sb-active-border: rgba(251,113,133,.28);
@@ -105,7 +107,8 @@ html[data-theme="dark"] {
   --cm-cmt:        #57534e;
   --cm-op:         #78716c;
   /* Sidebar darker in dark mode */
-  --sb-bg:            #141312;
+  --sb-bg:            #170f12;
+  --sb-bg-grad:       linear-gradient(180deg, #1c1216 0%, #120a0d 100%);
   --sb-text-1:        #f5f5f4;
   --sb-text-2:        #a8a29e;
   --sb-text-3:        #57534e;
@@ -129,21 +132,28 @@ body {
   transition: background .35s ease, color .25s ease;
 }
 
-/* ── Background — clean flat ─────────────────────────────────────────────── */
+/* ── Background — subtle accent blobs ───────────────────────────────────── */
 .bg-layer {
   position: fixed; inset: 0; z-index: 0;
   pointer-events: none;
-  background: var(--bg);
+  background:
+    radial-gradient(ellipse 55% 40% at 92% 8%,  rgba(251,113,133,.07) 0%, transparent 70%),
+    radial-gradient(ellipse 45% 35% at 6%  88%, rgba(251,146,60,.06)  0%, transparent 65%),
+    var(--bg);
   transition: background .35s ease;
 }
 #bg-svg { display: none; }
 
-/* ── Card ────────────────────────────────────────────────────────────────── */
+/* ── Card — with top highlight ───────────────────────────────────────────── */
 .glass {
   background: var(--card-bg);
   border: 1px solid var(--card-border);
-  box-shadow: var(--card-shadow);
+  /* top edge catches light, rest is normal shadow */
+  box-shadow: var(--card-shadow), inset 0 1px 0 rgba(255,255,255,.08);
   transition: background .35s, border-color .35s, box-shadow .35s;
+}
+html[data-theme="light"] .glass {
+  box-shadow: var(--card-shadow), inset 0 1px 0 rgba(255,255,255,.9);
 }
 
 /* ── App shell ───────────────────────────────────────────────────────────── */
@@ -171,7 +181,9 @@ body {
 .logo-wrap { display: flex; align-items: center; gap: 10px; }
 .logo-svg {
   width: 28px; height: 28px; color: #fb7185;
-  flex-shrink: 0; transition: color .3s;
+  flex-shrink: 0;
+  filter: drop-shadow(0 2px 8px rgba(251,113,133,.45));
+  transition: filter .3s;
 }
 .logo-text {
   font-size: 17px; font-weight: 800; letter-spacing: -.04em;
@@ -219,19 +231,19 @@ body {
 html[data-theme="light"] .ti-sun  { opacity: 1; color: #fb7185; }
 html[data-theme="dark"]  .ti-moon { opacity: 1; color: #fb7185; }
 .toggle-track {
-  width: 42px; height: 24px; border-radius: 999px;
-  border: 1.5px solid rgba(251,113,133,.35);
+  width: 38px; height: 20px; border-radius: 999px;
+  border: 1px solid rgba(251,113,133,.3);
   background: var(--accent-dim);
   position: relative; transition: background .35s, border-color .35s; flex-shrink: 0;
 }
 .toggle-thumb {
   position: absolute; top: 3px;
-  width: 14px; height: 14px; border-radius: 50%;
+  width: 12px; height: 12px; border-radius: 50%;
   background: var(--grad);
-  box-shadow: 0 1px 6px rgba(251,113,133,.5);
-  transition: left .3s cubic-bezier(.34,1.4,.64,1);
+  box-shadow: 0 1px 4px rgba(251,113,133,.45);
+  transition: left .28s cubic-bezier(.34,1.4,.64,1);
 }
-html[data-theme="dark"]  .toggle-thumb { left: 22px; }
+html[data-theme="dark"]  .toggle-thumb { left: 21px; }
 html[data-theme="light"] .toggle-thumb { left: 3px; }
 
 /* ── Layout ──────────────────────────────────────────────────────────────── */
@@ -243,13 +255,13 @@ html[data-theme="light"] .toggle-thumb { left: 3px; }
   padding: 0 10px 10px;
 }
 
-/* ── Sidebar — always dark ───────────────────────────────────────────────── */
+/* ── Sidebar — always dark with warm gradient ────────────────────────────── */
 .sidebar {
   display: flex; flex-direction: column;
   border-radius: 22px; overflow: hidden;
-  background: var(--sb-bg) !important;
+  background: var(--sb-bg-grad) !important;
   border: 1px solid var(--sb-border) !important;
-  box-shadow: 0 4px 24px rgba(0,0,0,.18) !important;
+  box-shadow: 0 4px 24px rgba(0,0,0,.22), inset 0 1px 0 rgba(255,255,255,.05) !important;
   transition: background .35s, box-shadow .35s;
 }
 
@@ -380,21 +392,33 @@ html[data-theme="light"] .toggle-thumb { left: 3px; }
 /* ── Buttons ─────────────────────────────────────────────────────────────── */
 .btn {
   display: inline-flex; align-items: center; gap: 5px;
-  padding: 5px 16px; border-radius: 999px;
+  padding: 5px 16px; border-radius: 11px;
   font-size: 12px; font-weight: 600;
   font-family: 'Plus Jakarta Sans', 'Inter', sans-serif;
   cursor: pointer; border: 1px solid transparent;
   transition: all .15s; white-space: nowrap; line-height: 1.4;
+  position: relative; overflow: hidden;
 }
 .btn:disabled { opacity: .42; cursor: not-allowed; }
 
 .btn-run {
   background: var(--grad);
   color: #fff; border-color: transparent;
-  box-shadow: 0 3px 16px rgba(251,113,133,.4);
+  box-shadow: 0 3px 16px rgba(251,113,133,.38);
 }
+/* shine overlay — static on top, appears on hover */
+.btn-run::before {
+  content: '';
+  position: absolute; inset: 0;
+  background: var(--grad-shine);
+  opacity: 0;
+  transition: opacity .25s ease;
+  border-radius: inherit;
+  pointer-events: none;
+}
+.btn-run:hover:not(:disabled)::before { opacity: 1; }
 .btn-run:hover:not(:disabled) {
-  box-shadow: 0 5px 24px rgba(251,113,133,.55);
+  box-shadow: 0 5px 22px rgba(251,113,133,.52);
   transform: translateY(-1px);
 }
 
@@ -714,19 +738,18 @@ kbd {
   <header class="header glass">
     <div class="header-left">
       <div class="logo-wrap">
-        <!-- Database cylinder logo (SVG) -->
+        <!-- Table/data icon: rounded square with 3 row lines -->
         <svg class="logo-svg" viewBox="0 0 28 28" fill="none">
-          <ellipse cx="14" cy="22" rx="10" ry="3" fill="currentColor" opacity=".15"
-                   stroke="currentColor" stroke-width="1.4"/>
-          <line x1="4" y1="13" x2="4" y2="22" stroke="currentColor" stroke-width="1.4"/>
-          <line x1="24" y1="13" x2="24" y2="22" stroke="currentColor" stroke-width="1.4"/>
-          <ellipse cx="14" cy="13" rx="10" ry="3" fill="currentColor" opacity=".28"
-                   stroke="currentColor" stroke-width="1.4"/>
-          <line x1="4" y1="6" x2="4" y2="13" stroke="currentColor" stroke-width="1.4"/>
-          <line x1="24" y1="6" x2="24" y2="13" stroke="currentColor" stroke-width="1.4"/>
-          <ellipse cx="14" cy="6" rx="10" ry="3" fill="currentColor" opacity=".5"
-                   stroke="currentColor" stroke-width="1.4"/>
-          <ellipse cx="14" cy="6" rx="5.5" ry="1.4" fill="currentColor" opacity=".2"/>
+          <defs>
+            <linearGradient id="logo-g" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#fb7185"/>
+              <stop offset="100%" stop-color="#fb923c"/>
+            </linearGradient>
+          </defs>
+          <rect x="3" y="3" width="22" height="22" rx="6" fill="url(#logo-g)"/>
+          <line x1="8" y1="10" x2="20" y2="10" stroke="rgba(255,255,255,.9)" stroke-width="1.8" stroke-linecap="round"/>
+          <line x1="8" y1="14" x2="20" y2="14" stroke="rgba(255,255,255,.9)" stroke-width="1.8" stroke-linecap="round"/>
+          <line x1="8" y1="18" x2="15" y2="18" stroke="rgba(255,255,255,.7)" stroke-width="1.8" stroke-linecap="round"/>
         </svg>
         <span class="logo-text">db<span>-engine</span></span>
       </div>
@@ -774,11 +797,21 @@ kbd {
     <aside class="sidebar glass">
       <div class="sidebar-head">
         <span class="section-label">Tables</span>
-        <button class="icon-btn" onclick="refreshTables()" title="Refresh">↻</button>
+        <button class="icon-btn" onclick="refreshTables()" title="Refresh">
+          <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12.5 2v3.5H9"/>
+            <path d="M1.5 12V8.5H5"/>
+            <path d="M12.5 5.5A5.5 5.5 0 0 0 3.2 3.2"/>
+            <path d="M1.5 8.5A5.5 5.5 0 0 0 10.8 10.8"/>
+          </svg>
+        </button>
       </div>
       <div class="tbl-list" id="tbl-list">
         <div class="empty-state" style="min-height:80px">
-          <span class="empty-icon" style="font-size:20px">⟳</span>
+          <svg class="empty-icon" width="28" height="28" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" color="var(--sb-text-3)">
+            <path d="M12 2v3H9"/><path d="M2 12V9H5"/>
+            <path d="M12 5A5 5 0 0 0 3.5 3.5"/><path d="M2 9a5 5 0 0 0 8.5 1.5"/>
+          </svg>
           <p>Loading…</p>
         </div>
       </div>
@@ -793,11 +826,15 @@ kbd {
           <span class="panel-label">SQL Editor</span>
           <div class="editor-actions">
             <button class="btn btn-run" id="run-btn" onclick="runQuery()">
-              <span id="run-icon">▶</span> Run
+              <span id="run-icon"><svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor"><polygon points="2,1 9,5 2,9"/></svg></span> Run
             </button>
-            <button class="btn btn-ghost" onclick="explainQuery()">⚡ Explain</button>
+            <button class="btn btn-ghost" onclick="explainQuery()">
+              <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M7 2v1M7 11v1M2 7H1M13 7h-1"/><path d="M4.2 4.2 3.5 3.5M10.5 10.5l-.7-.7M9.8 4.2l.7-.7M3.5 10.5l.7-.7"/><circle cx="7" cy="7" r="2.5"/></svg>
+              Explain
+            </button>
             <button class="btn btn-teal" id="analyze-btn" onclick="analyzeTable()" style="display:none">
-              ∿ Analyze
+              <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="1,10 4,6 7,8 10,3 13,5"/></svg>
+              Analyze
             </button>
           </div>
         </div>
@@ -805,13 +842,13 @@ kbd {
           <textarea id="sql-editor"></textarea>
         </div>
         <div class="editor-hint">
-          <kbd>⌘ Enter</kbd> <kbd>Ctrl Enter</kbd> to run
+          <kbd>Cmd+Enter</kbd> <kbd>Ctrl+Enter</kbd> to run
         </div>
         <!-- Query History (collapsible strip) -->
         <div class="hist-bar" id="hist-bar" onclick="toggleHistory()">
           <span class="hist-bar-label">History</span>
           <span class="hist-count" id="hist-count"></span>
-          <span class="hist-chevron">▾</span>
+          <svg class="hist-chevron" width="11" height="11" viewBox="0 0 11 11" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="2,3.5 5.5,7.5 9,3.5"/></svg>
         </div>
         <div class="hist-panel" id="hist-panel">
           <div class="hist-list" id="hist-list"></div>
@@ -826,15 +863,13 @@ kbd {
         </div>
         <div class="results-body" id="results-body">
           <div class="empty-state">
-            <!-- Database cylinder empty-state icon -->
-            <svg class="empty-icon" width="56" height="56" viewBox="0 0 28 28" fill="none" color="var(--accent)">
-              <ellipse cx="14" cy="22" rx="10" ry="3" stroke="currentColor" stroke-width="1.3"/>
-              <line x1="4" y1="13" x2="4" y2="22" stroke="currentColor" stroke-width="1.3"/>
-              <line x1="24" y1="13" x2="24" y2="22" stroke="currentColor" stroke-width="1.3"/>
-              <ellipse cx="14" cy="13" rx="10" ry="3" stroke="currentColor" stroke-width="1.3"/>
-              <line x1="4" y1="6" x2="4" y2="13" stroke="currentColor" stroke-width="1.3"/>
-              <line x1="24" y1="6" x2="24" y2="13" stroke="currentColor" stroke-width="1.3"/>
-              <ellipse cx="14" cy="6" rx="10" ry="3" stroke="currentColor" stroke-width="1.3"/>
+            <!-- Table data icon — matches logo style -->
+            <svg class="empty-icon" width="52" height="52" viewBox="0 0 28 28" fill="none">
+              <rect x="3" y="3" width="22" height="22" rx="6" fill="var(--accent)" opacity=".12"/>
+              <rect x="3" y="3" width="22" height="22" rx="6" stroke="var(--accent)" stroke-width="1.4" opacity=".5"/>
+              <line x1="8" y1="10" x2="20" y2="10" stroke="var(--accent)" stroke-width="1.6" stroke-linecap="round" opacity=".8"/>
+              <line x1="8" y1="14" x2="20" y2="14" stroke="var(--accent)" stroke-width="1.6" stroke-linecap="round" opacity=".6"/>
+              <line x1="8" y1="18" x2="15" y2="18" stroke="var(--accent)" stroke-width="1.6" stroke-linecap="round" opacity=".4"/>
             </svg>
             <p>Run a query to see results</p>
           </div>
@@ -941,13 +976,10 @@ function renderSidebar() {
       <div class="tbl-item${active ? ' active' : ''}" onclick="selectTable(${q(t.name)})">
         <div class="tbl-row">
           <svg class="tbl-icon-svg" viewBox="0 0 14 14" fill="none" style="color:${iconColor}">
-            <ellipse cx="7" cy="11" rx="5" ry="1.4" stroke="currentColor" stroke-width="1.1"/>
-            <line x1="2" y1="6.5" x2="2" y2="11" stroke="currentColor" stroke-width="1.1"/>
-            <line x1="12" y1="6.5" x2="12" y2="11" stroke="currentColor" stroke-width="1.1"/>
-            <ellipse cx="7" cy="6.5" rx="5" ry="1.4" stroke="currentColor" stroke-width="1.1"/>
-            <line x1="2" y1="3" x2="2" y2="6.5" stroke="currentColor" stroke-width="1.1"/>
-            <line x1="12" y1="3" x2="12" y2="6.5" stroke="currentColor" stroke-width="1.1"/>
-            <ellipse cx="7" cy="3" rx="5" ry="1.4" stroke="currentColor" stroke-width="1.1"/>
+            <rect x="1.5" y="1.5" width="11" height="11" rx="2.5" fill="currentColor" opacity=".15" stroke="currentColor" stroke-width="1.1"/>
+            <line x1="4" y1="5" x2="10" y2="5" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/>
+            <line x1="4" y1="7.5" x2="10" y2="7.5" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/>
+            <line x1="4" y1="10" x2="7.5" y2="10" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/>
           </svg>
           <span class="tbl-name">${esc(t.name)}</span>
           ${rowCount ? `<span class="tbl-rows">${rowCount}</span>` : ''}
@@ -969,7 +1001,7 @@ function renderDetails(t) {
 
   const cols = (t.columns || []).map(c => {
     const pk = c.name === pkCol
-      ? `<span class="pk-icon" title="Primary key">🔑</span>` : '';
+      ? `<svg class="pk-icon" title="Primary key" width="10" height="10" viewBox="0 0 14 14" fill="none" stroke="#fbbf24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:middle;margin-left:3px"><circle cx="5.5" cy="7" r="3"/><line x1="7.8" y1="7" x2="13" y2="7"/><line x1="11" y1="5.5" x2="11" y2="8.5"/><line x1="13" y1="5.5" x2="13" y2="8.5"/></svg>` : '';
     const idxBadges = (idxMap[c.name] || []).map(n =>
       `<span class="col-idx-badge" title="${esc(n)}">idx</span>`
     ).join('');
@@ -992,7 +1024,7 @@ function renderDetails(t) {
   const statsHtml = !t.stats
     ? `<div class="detail-group">
         <button class="analyze-hint" onclick="event.stopPropagation();analyzeTableByName(${q(t.name)})">
-          ∿ Run ANALYZE for statistics
+          Run ANALYZE for statistics
         </button>
        </div>`
     : `<div class="detail-group">
@@ -1200,7 +1232,7 @@ function renderOne(r) {
   if (r.error) {
     label.textContent = 'Error';
     meta.textContent  = r.duration;
-    body.innerHTML    = msgBox('error', '✕', r.error);
+    body.innerHTML    = msgBox('error', '', r.error);
     setStatus(r.error, 'err');
     return;
   }
@@ -1223,7 +1255,7 @@ function renderOne(r) {
     } else {
       label.textContent = 'Result';
       meta.textContent  = r.duration;
-      body.innerHTML    = msgBox('success', '✓', r.message);
+      body.innerHTML    = msgBox('success', '', r.message);
       setStatus(r.message, 'ok');
     }
   }
@@ -1239,7 +1271,7 @@ function buildCard(r, idx) {
     ${rowBadge}${errBadge}
   </div>`;
   let content = '';
-  if (r.error) content = msgBox('error', '✕', r.error);
+  if (r.error) content = msgBox('error', '', r.error);
   else if (r.columns && r.columns.length > 0)
     content = r.rows.length === 0
       ? `<div class="stmt-ok-msg" style="color:var(--text-3)">0 rows</div>`
@@ -1247,7 +1279,7 @@ function buildCard(r, idx) {
   else if (r.message)
     content = looksLikeExplain(r.message)
       ? renderExplain(r.message)
-      : `<div class="stmt-ok-msg"><span>✓</span>${esc(r.message)}</div>`;
+      : `<div class="stmt-ok-msg">${SVG_OK}${esc(r.message)}</div>`;
   return `<div class="stmt-card">${header}${content}</div>`;
 }
 
@@ -1351,7 +1383,11 @@ function showTip(e, text) {
 }
 function hideTip() { if (_tipEl) _tipEl.style.display = 'none'; }
 
-function msgBox(type, icon, text) {
+const SVG_OK  = `<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="2,7 5.5,10.5 12,4"/></svg>`;
+const SVG_ERR = `<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="11" y2="11"/><line x1="11" y1="3" x2="3" y2="11"/></svg>`;
+
+function msgBox(type, _icon, text) {
+  const icon = type === 'success' ? SVG_OK : SVG_ERR;
   return `<div class="msg-box ${type}">
     <span class="msg-icon">${icon}</span>
     <span class="msg-text">${esc(text)}</span>
@@ -1363,7 +1399,7 @@ function emptyResult(msg) {
 }
 
 function showError(msg) {
-  document.getElementById('results-body').innerHTML = msgBox('error', '✕', msg);
+  document.getElementById('results-body').innerHTML = msgBox('error', '', msg);
   setStatus(msg, 'err');
 }
 
@@ -1397,7 +1433,7 @@ function setRunning(on) {
   } else {
     btn.disabled = false;
     document.getElementById('run-icon').outerHTML =
-      '<span id="run-icon">▶</span>';
+      '<span id="run-icon"><svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor"><polygon points="2,1 9,5 2,9"/></svg></span>';
     body.classList.remove('loading');
   }
 }
