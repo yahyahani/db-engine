@@ -21,7 +21,7 @@ design decision in a real database engine exists, not just how to use one.
 | 7 | ✅ Done | B-Tree cursor — lazy leaf traversal, OR conditions, Union node |
 | 8 | ✅ Done | Transaction integration — crash recovery tests, no-steal verification |
 | 9 | ✅ Done | Secondary indexes — non-PK indexes, index selection |
-| 10 | 📋 Todo | Statistics — cardinality estimates, cost-based optimizer |
+| 10 | ✅ Done | Statistics — cardinality estimates, cost-based optimizer |
 | 11 | 📋 Todo | JOIN — multi-table queries, hash join |
 | 12 | 📋 Todo | Concurrency — MVCC, multiple readers/writers |
 | 13 | 📋 Todo | Network — TCP server, wire protocol |
@@ -309,20 +309,41 @@ DROP INDEX idx_users_age;
 
 ---
 
-## Planned phases
-
 ### Phase 10 — Statistics and cost-based optimizer
 
-The current planner is rule-based: it always pushes PK conditions into the index
-and post-filters the rest. It cannot compare the cost of different plans.
+**Package:** `stats/`, plus changes to `catalog/`, `planner/`, `executor/`
 
-A cost-based optimizer maintains per-table statistics (row count, column value
-histograms) and estimates the number of rows each plan node will produce. The
-optimizer picks the plan with the lowest estimated I/O cost — for example,
-choosing a full table scan when a highly selective non-indexed column would
-cause most rows to be discarded anyway.
+Adds a `stats` package and the `ANALYZE tablename` SQL command.  ANALYZE does
+a full B-Tree scan and records, for each column: `RowCount`, `NDistinct`,
+`Min`, and `Max` (INT columns only).  Stats are persisted to `<dir>/stats` in a
+compact binary file (magic `0x53544154`) and loaded on `DB.Open`.
+
+**Cost model** (used by `planGroup` when stats are available):
+- `FullScanCost(n)` = `⌈n / 56⌉` leaf-page I/Os — read the whole table.
+- `IndexLookupCost(k, n)` = `k × 2 × log₂(n)` page I/Os — two B-Tree traversals per matching row (secondary index + primary lookup).
+- **Selectivity estimation**: `OpEq` → `1 / NDistinct`; range operators use
+  `(covered interval) / (Max - Min + 1)`.
+
+The planner calls `costBasedPlanGroup` when `*stats.TableStats` is non-nil:
+it picks the secondary index whose IndexLookupCost beats FullScanCost, or
+falls back to a PK range scan.  With `nil` stats (no ANALYZE yet) it reverts
+to the Phase 9 rule-based heuristic.
+
+Crossover point (1 matching row): index beats full scan when `n ≳ 5 000`.
+For smaller tables the full scan is cheaper — the same threshold PostgreSQL
+uses when choosing sequential vs index scans.
+
+`catalog.IntColSize` / `TextColSize` are now exported so the stats collector
+can decode rows without depending on the executor package.
+
+New SQL syntax:
+```sql
+ANALYZE users;
+```
 
 ---
+
+## Planned phases
 
 ### Phase 11 — JOIN and multi-table queries
 
