@@ -20,7 +20,7 @@ design decision in a real database engine exists, not just how to use one.
 | 6 | ✅ Done | Query planner — physical plans, Volcano iterators, EXPLAIN |
 | 7 | ✅ Done | B-Tree cursor — lazy leaf traversal, OR conditions, Union node |
 | 8 | ✅ Done | Transaction integration — crash recovery tests, no-steal verification |
-| 9 | 📋 Todo | Secondary indexes — non-PK indexes, index selection |
+| 9 | ✅ Done | Secondary indexes — non-PK indexes, index selection |
 | 10 | 📋 Todo | Statistics — cardinality estimates, cost-based optimizer |
 | 11 | 📋 Todo | JOIN — multi-table queries, hash join |
 | 12 | 📋 Todo | Concurrency — MVCC, multiple readers/writers |
@@ -278,19 +278,38 @@ that combine the executor, WAL, TxPager, and buffer pool layers.
 
 ---
 
-## Planned phases
-
 ### Phase 9 — Secondary indexes
 
-The B-Tree currently indexes only the primary key (first INT column). A
-secondary index stores `(indexed-column-value → primary-key)` in its own B-Tree
-file. Point lookups and range scans on any column become O(log n) instead of
-O(n).
+**Packages:** `catalog/`, `query/`, `planner/`, `executor/`
 
-The planner would inspect available indexes and choose the cheapest access path
-for each condition.
+Secondary indexes store `(indexed-col-value → primary-key)` in a separate
+`<name>.idx` B-Tree file. The planner's `planGroup()` checks `IndexForColumn()`
+before falling back to a PK scan; when an index exists on a WHERE column it emits
+an `IndexLookup` node (secondary index cursor + primary B-Tree point lookup per
+hit). All remaining conditions become a `Filter` above it.
+
+Key decisions:
+- **Unique indexes only in Phase 9.** B-Tree `Insert` overwrites duplicates; to
+  prevent silent PK replacement the executor checks for an existing entry before
+  writing.
+- **No back-fill.** `CREATE INDEX` creates an empty B-Tree; only rows inserted
+  after the `CREATE INDEX` are indexed.
+- **Catalog V2** (`0xCA7A1061`). Each table now serializes a `numIndexes` field
+  followed by `(name, column)` pairs. V1 catalogs are rejected with a clear error.
+- **WAL filename fix.** Index pager map keys use an `"idx:"` prefix to avoid
+  collisions with table keys. `commitTx` now strips this prefix and appends `.idx`
+  rather than blindly appending `.db` to every key.
+
+New SQL syntax:
+```sql
+CREATE INDEX idx_users_age ON users (age);
+SELECT * FROM users WHERE age = 25;          -- uses IndexLookup
+DROP INDEX idx_users_age;
+```
 
 ---
+
+## Planned phases
 
 ### Phase 10 — Statistics and cost-based optimizer
 
