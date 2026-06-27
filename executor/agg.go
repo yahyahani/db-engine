@@ -78,7 +78,7 @@ func (db *DB) execAggSelect(s *query.SelectStmt, snap mvcc.Snapshot) (*Result, e
 
 	// Step 4: HAVING filter.
 	if s.Having != nil {
-		outRows, err = applyHaving(outRows, outCols, s.Having)
+		outRows, err = applyHaving(outRows, outCols, s.Having, s.Columns)
 		if err != nil {
 			return nil, err
 		}
@@ -281,11 +281,22 @@ func resolveAggCol(agg *query.AggCall, rawIdx map[string]int) (int, error) {
 // ── HAVING ────────────────────────────────────────────────────────────────────
 
 // applyHaving filters outRows by the HAVING clause.
-// Conditions reference output column names (bare names or aliases).
-func applyHaving(rows [][]catalog.Value, colNames []string, having *query.WhereClause) ([][]catalog.Value, error) {
-	outIdx := make(map[string]int, len(colNames))
+// Conditions may reference output column names (bare names or aliases) OR
+// aggregate calls directly (e.g. COUNT(*), SUM(score)).  Both resolve to the
+// correct output column even when the aggregate is aliased in the SELECT list.
+func applyHaving(rows [][]catalog.Value, colNames []string, having *query.WhereClause, exprs []query.SelectExpr) ([][]catalog.Value, error) {
+	outIdx := make(map[string]int, len(colNames)*2)
 	for i, name := range colNames {
 		outIdx[strings.ToLower(name)] = i
+	}
+	// Also register the canonical (unaliased) aggregate output name so that
+	// HAVING COUNT(*) >= 2 resolves correctly even when the column is aliased
+	// as e.g. "aantal".  SelectExpr{Agg: e.Agg}.OutputName() strips the alias.
+	for i, e := range exprs {
+		if e.Agg != nil {
+			rawName := (query.SelectExpr{Agg: e.Agg}).OutputName()
+			outIdx[strings.ToLower(rawName)] = i
+		}
 	}
 
 	var out [][]catalog.Value

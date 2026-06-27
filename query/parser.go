@@ -619,9 +619,34 @@ func (p *parser) parseAndGroup() ([]Condition, error) {
 	return group, nil
 }
 
+// parseConditionLHS parses the left-hand side of a WHERE/HAVING condition.
+// Accepts either a column reference ("col", "table.col") or an aggregate call
+// (COUNT(*), SUM(col), …).  For aggregate calls the canonical output name is
+// returned — e.g. "COUNT(*)" or "SUM(score)" — so the HAVING evaluator can
+// match it against the aggregated output row even when the column is aliased.
+func (p *parser) parseConditionLHS() (string, error) {
+	switch p.peek().Kind {
+	case TokCount, TokSum, TokAvg, TokMin, TokMax:
+		// Only treat as aggregate call when immediately followed by '('.
+		// Otherwise it's a column alias that happens to share a keyword name
+		// (e.g. HAVING avg > 5000 where avg is a SELECT alias).
+		if p.pos+1 < len(p.tokens) && p.tokens[p.pos+1].Kind == TokLParen {
+			fn := p.consume()
+			agg, err := p.parseAggCall(fn)
+			if err != nil {
+				return "", err
+			}
+			return (SelectExpr{Agg: agg}).OutputName(), nil
+		}
+		return p.parseColRef()
+	default:
+		return p.parseColRef()
+	}
+}
+
 func (p *parser) parseCondition() (Condition, error) {
-	// LHS: possibly qualified column reference.
-	lhs, err := p.parseColRef()
+	// LHS: column reference or aggregate call (for HAVING).
+	lhs, err := p.parseConditionLHS()
 	if err != nil {
 		return Condition{}, fmt.Errorf("condition: expected column name")
 	}
