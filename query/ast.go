@@ -76,18 +76,50 @@ func (op CompareOp) String() string {
 	return [...]string{"=", ">", "<", ">=", "<="}[op]
 }
 
-// Condition is one predicate in a WHERE or JOIN ON clause.
+// Condition is one predicate in a WHERE, HAVING, or JOIN ON clause.
 //
-// Two forms:
-//   - Filter predicate: Column op Val    (RHSCol == "")
-//   - Join predicate:   Column op RHSCol (RHSCol != "")
+// Simple forms (mutually exclusive RHS):
+//   Column op Val    — filter against a literal value (RHSCol == "")
+//   Column op RHSCol — column-to-column join condition (RHSCol != "")
 //
-// Column and RHSCol may be qualified ("alias.col") or bare ("col").
+// Subquery / list forms (set after parsing or subquery flattening):
+//   Column IN  InList   — membership in a literal value list
+//   Column IN  InQuery  — membership via subquery (flattened to InList before execution)
+//   ExistsQuery != nil  — EXISTS / NOT EXISTS (Negated=true for NOT EXISTS)
+//   ScalarQuery != nil  — col op (SELECT …) scalar subquery (flattened to Val before execution)
+//
+// AlwaysFalse is injected by the subquery flattener when a condition can never
+// pass (e.g. NOT IN on a non-empty subquery result, or EXISTS on empty result).
+// evalPreds short-circuits immediately when it sees AlwaysFalse.
 type Condition struct {
 	Column string
 	Op     CompareOp
-	Val    catalog.Value // right operand when RHSCol == ""
-	RHSCol string        // right operand when non-empty (join condition)
+	Val    catalog.Value // right operand for simple filter; also used after scalar-subquery flattening
+	RHSCol string        // non-empty → column-to-column join condition
+
+	// IN / NOT IN with a literal list: col IN (1, 2, 3)
+	// Set directly by the parser or after InQuery/ScalarQuery flattening.
+	InList []catalog.Value
+
+	// IN / NOT IN with an uncorrelated subquery: col IN (SELECT …)
+	// Replaced by InList during subquery flattening before scan time.
+	InQuery *SelectStmt
+
+	// EXISTS / NOT EXISTS: EXISTS (SELECT …)
+	// Column is ignored. Negated=true for NOT EXISTS.
+	// Replaced by AlwaysFalse (or dropped) during subquery flattening.
+	ExistsQuery *SelectStmt
+
+	// Scalar subquery on the RHS: col op (SELECT …)
+	// Must return exactly one row/column; that value is stored in Val during flattening.
+	ScalarQuery *SelectStmt
+
+	// Negated inverts IN and EXISTS conditions (NOT IN, NOT EXISTS).
+	Negated bool
+
+	// AlwaysFalse is set by the subquery flattener when this condition can never
+	// pass for any row.  evalPreds returns false immediately on seeing it.
+	AlwaysFalse bool
 }
 
 // IsJoinCond reports whether this is a column-to-column join condition.

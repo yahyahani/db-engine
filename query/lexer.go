@@ -49,6 +49,9 @@ var keywords = map[string]TokenKind{
 	"avg":      TokAvg,
 	"min":      TokMin,
 	"max":      TokMax,
+	"in":       TokIn,
+	"not":      TokNot,
+	"exists":   TokExists,
 }
 
 // Tokenize converts a SQL string into a flat slice of Tokens.

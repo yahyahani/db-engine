@@ -376,7 +376,7 @@ func costBasedPlanGroup(tbl *catalog.Table, conds []query.Condition, ts *stats.T
 	bestIdx := -1
 
 	for i, cond := range conds {
-		if cond.IsJoinCond() {
+		if !isSimpleCond(cond) || cond.IsJoinCond() {
 			continue
 		}
 		def := tbl.IndexForColumn(cond.Column)
@@ -418,7 +418,7 @@ func costBasedPlanGroup(tbl *catalog.Table, conds []query.Condition, ts *stats.T
 
 func ruleBasedPlanGroup(tbl *catalog.Table, conds []query.Condition) PhysicalNode {
 	for i, cond := range conds {
-		if cond.IsJoinCond() {
+		if !isSimpleCond(cond) || cond.IsJoinCond() {
 			continue
 		}
 		def := tbl.IndexForColumn(cond.Column)
@@ -488,7 +488,9 @@ func classifyGroup(tbl *catalog.Table, conds []query.Condition) (minKey, maxKey 
 	pkName := strings.ToLower(tbl.Columns[pkIdx].Name)
 
 	for _, cond := range conds {
-		if strings.ToLower(cond.Column) != pkName || cond.Val.Type != catalog.TypeInt {
+		// Non-simple conditions (IN lists, EXISTS, AlwaysFalse) cannot be turned
+		// into B-Tree range bounds; push them to the post-scan filter.
+		if !isSimpleCond(cond) || strings.ToLower(cond.Column) != pkName || cond.Val.Type != catalog.TypeInt {
 			post = append(post, cond)
 			continue
 		}
@@ -540,6 +542,17 @@ func resolveColumnsSingle(tbl *catalog.Table, cols []string) ([]string, []int, e
 		idxs[i] = idx
 	}
 	return names, idxs, nil
+}
+
+// isSimpleCond returns true for traditional column op value / join conditions.
+// Phase 16 subquery-derived conditions (InList, AlwaysFalse, etc.) must not
+// be used for B-Tree range bounds; they are pushed to the post-scan Filter.
+func isSimpleCond(c query.Condition) bool {
+	return !c.AlwaysFalse &&
+		c.InList == nil &&
+		c.InQuery == nil &&
+		c.ExistsQuery == nil &&
+		c.ScalarQuery == nil
 }
 
 func max64(a, b uint64) uint64 {

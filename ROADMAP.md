@@ -27,6 +27,7 @@ design decision in a real database engine exists, not just how to use one.
 | 13 | ✅ Done | Network — TCP server, wire protocol |
 | 14 | ✅ Done | DML — DELETE and UPDATE |
 | 15 | ✅ Done | Aggregates — COUNT/SUM/AVG/MIN/MAX, GROUP BY, HAVING, ORDER BY |
+| 16 | ✅ Done | Subqueries — IN (list/subquery), NOT IN, EXISTS, NOT EXISTS, scalar subqueries |
 
 ---
 
@@ -543,6 +544,63 @@ SELECT dept, COUNT(*) AS cnt FROM employees GROUP BY dept;
 SELECT dept, AVG(salary) AS avg FROM employees
        GROUP BY dept HAVING avg > 5000 ORDER BY avg DESC LIMIT 3;
 SELECT id, name FROM users ORDER BY name ASC;
+```
+
+### Phase 16 — Subqueries
+
+**Package:** `executor/subquery.go`, `query/`
+
+Adds uncorrelated subquery support to WHERE and HAVING clauses, completing the
+core SQL query language.
+
+**Supported subquery forms:**
+
+| Form | Semantics |
+|------|-----------|
+| `col IN (v1, v2, …)` | Literal value list membership |
+| `col NOT IN (v1, v2, …)` | Negated list membership |
+| `col IN (SELECT …)` | Inner query result set membership |
+| `col NOT IN (SELECT …)` | Negated subquery membership |
+| `EXISTS (SELECT …)` | True when inner query returns any rows |
+| `NOT EXISTS (SELECT …)` | True when inner query returns no rows |
+| `col op (SELECT …)` | Scalar: inner query must return exactly one row/column |
+
+**Execution model — subquery flattening:**
+
+All subqueries are *uncorrelated* (the inner query does not reference outer
+columns beyond its own schema). Before the outer query acquires any lock or
+builds any plan, `flattenSubqueries` pre-executes every inner query and
+rewrites its condition to a resolved form:
+
+```
+IN (SELECT …)      → col IN (v1, v2, …)   — InList
+col op (SELECT …)  → col op literal        — Val
+EXISTS (…)         → condition dropped (always-true) or AlwaysFalse sentinel
+```
+
+This keeps the Volcano iterator and `evalPreds` completely unaware of
+subqueries — they only see already-resolved `InList`, `Val`, or `AlwaysFalse`.
+
+**Locking discipline:** `flattenSubqueries` is called before `db.mu.RLock` is
+acquired.  Each inner `execSelectFlattened` call acquires and releases its own
+`RLock` without nesting, so there is no deadlock risk.
+
+**Planner guard:** `isSimpleCond()` prevents the planner's `classifyGroup` from
+treating new condition types (InList, AlwaysFalse) as B-Tree range bounds —
+they are always routed to the post-scan `Filter` node.
+
+**Limitations:** Correlated subqueries (inner query references outer columns)
+are not supported. Attempting one produces a "column not found" error from
+the inner execution.
+
+New SQL syntax:
+```sql
+SELECT name FROM users WHERE id IN (1, 2, 5);
+SELECT name FROM users WHERE id NOT IN (SELECT banned_id FROM banned);
+SELECT name FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE orders.uid = 1);
+SELECT name FROM users WHERE age > (SELECT AVG(age) FROM users);
+DELETE FROM users WHERE id IN (SELECT uid FROM suspended);
+UPDATE users SET score = 0 WHERE id NOT IN (SELECT uid FROM premium);
 ```
 
 ---

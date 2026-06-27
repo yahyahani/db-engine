@@ -291,14 +291,14 @@ func (p *parser) parseSelect() (*SelectStmt, error) {
 		if _, err := p.expect(TokBy); err != nil {
 			return nil, fmt.Errorf("GROUP: expected BY")
 		}
-		col, err := p.expect(TokIdent)
+		col, err := p.parseIdent()
 		if err != nil {
 			return nil, fmt.Errorf("GROUP BY: expected column name")
 		}
 		stmt.GroupBy = []string{col.Text}
 		for p.peek().Kind == TokComma {
 			p.consume()
-			col, err = p.expect(TokIdent)
+			col, err = p.parseIdent()
 			if err != nil {
 				return nil, fmt.Errorf("GROUP BY: expected column name after ','")
 			}
@@ -349,8 +349,9 @@ func (p *parser) parseSelect() (*SelectStmt, error) {
 	return stmt, nil
 }
 
-// parseSelectExpr parses one SELECT expression: col, agg(*), agg(col), or any
-// of the above followed by AS alias.
+// parseSelectExpr parses one SELECT expression: col, agg(*), agg(col),
+// integer literal (e.g. SELECT 1), string literal, or any of the above
+// followed by AS alias.
 func (p *parser) parseSelectExpr() (SelectExpr, error) {
 	var e SelectExpr
 
@@ -362,6 +363,16 @@ func (p *parser) parseSelectExpr() (SelectExpr, error) {
 			return SelectExpr{}, err
 		}
 		e.Agg = agg
+	case TokIntLit:
+		// Constant expression: SELECT 1, SELECT 42 …
+		// Common in EXISTS subqueries where column values are irrelevant.
+		// The executor/flattenSubqueries normalises EXISTS inner queries to
+		// SELECT * before planning, so this value never reaches the planner.
+		t := p.consume()
+		e.Col = t.Text // e.g. "1"
+	case TokStrLit:
+		t := p.consume()
+		e.Col = "'" + t.Text + "'"
 	default:
 		col, err := p.parseColRef()
 		if err != nil {
@@ -433,10 +444,11 @@ func (p *parser) parseOrderByExpr() (OrderByExpr, error) {
 }
 
 // parseIdent parses a name token. It accepts TokIdent and any keyword token
-// so that words like "avg", "sum", "count" can be used as column or alias names.
+// so that words like "avg", "sum", "count", "in", "not", "exists" can be
+// used as column or alias names.
 func (p *parser) parseIdent() (Token, error) {
 	t := p.peek()
-	if t.Kind >= TokSelect && t.Kind <= TokMax {
+	if t.Kind >= TokSelect && t.Kind <= TokExists {
 		return p.consume(), nil
 	}
 	if t.Kind == TokIdent {
@@ -645,11 +657,37 @@ func (p *parser) parseConditionLHS() (string, error) {
 }
 
 func (p *parser) parseCondition() (Condition, error) {
-	// LHS: column reference or aggregate call (for HAVING).
+	// ── EXISTS / NOT EXISTS (no LHS column) ──────────────────────────────────
+	if p.peek().Kind == TokExists {
+		return p.parseExistsCond(false)
+	}
+	if p.peek().Kind == TokNot {
+		if p.pos+1 < len(p.tokens) && p.tokens[p.pos+1].Kind == TokExists {
+			p.consume() // NOT
+			return p.parseExistsCond(true)
+		}
+	}
+
+	// ── LHS: column reference or aggregate call (for HAVING) ─────────────────
 	lhs, err := p.parseConditionLHS()
 	if err != nil {
 		return Condition{}, fmt.Errorf("condition: expected column name")
 	}
+
+	// ── col IN / NOT IN (...) ─────────────────────────────────────────────────
+	if p.peek().Kind == TokIn {
+		p.consume()
+		return p.parseInCond(lhs, false)
+	}
+	if p.peek().Kind == TokNot {
+		if p.pos+1 < len(p.tokens) && p.tokens[p.pos+1].Kind == TokIn {
+			p.consume() // NOT
+			p.consume() // IN
+			return p.parseInCond(lhs, true)
+		}
+	}
+
+	// ── Regular comparison operator ───────────────────────────────────────────
 	opTok := p.consume()
 	var op CompareOp
 	switch opTok.Kind {
@@ -666,8 +704,23 @@ func (p *parser) parseCondition() (Condition, error) {
 	default:
 		return Condition{}, fmt.Errorf("condition: expected =, >, <, >=, or <=, got %q", opTok.Text)
 	}
-	// RHS: identifier → column reference (join/cross-table condition);
-	//      literal  → value filter condition.
+
+	// ── RHS: scalar subquery, column reference, or literal ───────────────────
+	// Scalar subquery: col op (SELECT ...)
+	if p.peek().Kind == TokLParen &&
+		p.pos+1 < len(p.tokens) && p.tokens[p.pos+1].Kind == TokSelect {
+		p.consume() // (
+		sq, err := p.parseSelect()
+		if err != nil {
+			return Condition{}, fmt.Errorf("scalar subquery: %w", err)
+		}
+		if _, err := p.expect(TokRParen); err != nil {
+			return Condition{}, fmt.Errorf("scalar subquery: expected ')'")
+		}
+		return Condition{Column: lhs, Op: op, ScalarQuery: sq}, nil
+	}
+
+	// Column reference (join / cross-table condition).
 	if p.peek().Kind == TokIdent {
 		rhs, err := p.parseColRef()
 		if err != nil {
@@ -675,11 +728,67 @@ func (p *parser) parseCondition() (Condition, error) {
 		}
 		return Condition{Column: lhs, Op: op, RHSCol: rhs}, nil
 	}
+
+	// Literal value.
 	val, err := p.parseValue()
 	if err != nil {
 		return Condition{}, fmt.Errorf("condition: %w", err)
 	}
 	return Condition{Column: lhs, Op: op, Val: val}, nil
+}
+
+// parseExistsCond parses: EXISTS (SELECT …) or NOT EXISTS (SELECT …).
+// Called after EXISTS has been peeked (and NOT consumed if negated).
+func (p *parser) parseExistsCond(negated bool) (Condition, error) {
+	p.consume() // EXISTS
+	if _, err := p.expect(TokLParen); err != nil {
+		return Condition{}, fmt.Errorf("EXISTS: expected '('")
+	}
+	sq, err := p.parseSelect()
+	if err != nil {
+		return Condition{}, fmt.Errorf("EXISTS subquery: %w", err)
+	}
+	if _, err := p.expect(TokRParen); err != nil {
+		return Condition{}, fmt.Errorf("EXISTS: expected ')'")
+	}
+	return Condition{ExistsQuery: sq, Negated: negated}, nil
+}
+
+// parseInCond parses the tail of: col IN (...) or col NOT IN (...).
+// Called after IN has already been consumed.  col is the resolved LHS.
+func (p *parser) parseInCond(col string, negated bool) (Condition, error) {
+	if _, err := p.expect(TokLParen); err != nil {
+		return Condition{}, fmt.Errorf("IN: expected '('")
+	}
+	// Subquery form: col IN (SELECT ...)
+	if p.peek().Kind == TokSelect {
+		sq, err := p.parseSelect()
+		if err != nil {
+			return Condition{}, fmt.Errorf("IN subquery: %w", err)
+		}
+		if _, err := p.expect(TokRParen); err != nil {
+			return Condition{}, fmt.Errorf("IN subquery: expected ')'")
+		}
+		return Condition{Column: col, InQuery: sq, Negated: negated}, nil
+	}
+	// Literal list form: col IN (v1, v2, ...)
+	first, err := p.parseValue()
+	if err != nil {
+		return Condition{}, fmt.Errorf("IN list: expected value")
+	}
+	vals := []catalog.Value{first}
+	for p.peek().Kind == TokComma {
+		p.consume()
+		v, err := p.parseValue()
+		if err != nil {
+			return Condition{}, fmt.Errorf("IN list: expected value after ','")
+		}
+		vals = append(vals, v)
+	}
+	if _, err := p.expect(TokRParen); err != nil {
+		return Condition{}, fmt.Errorf("IN list: expected ')'")
+	}
+	return Condition{Column: col, InList: vals, Negated: negated}, nil
 }
 
 func (p *parser) parseValue() (catalog.Value, error) {

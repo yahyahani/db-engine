@@ -9,7 +9,7 @@
 [![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?style=flat&logo=go)](https://golang.org)
 [![License](https://img.shields.io/badge/License-MIT-green?style=flat)](LICENSE)
 [![Build](https://img.shields.io/badge/build-passing-brightgreen?style=flat)](#getting-started)
-[![Tests](https://img.shields.io/badge/tests-288%20passing-brightgreen?style=flat)](#running-the-tests)
+[![Tests](https://img.shields.io/badge/tests-308%20passing-brightgreen?style=flat)](#running-the-tests)
 
 </div>
 
@@ -31,7 +31,7 @@ The result is a working database that can execute multi-table SQL queries, survi
 |---|---|---|
 | 💾 | **Storage engine** | Fixed 4 KiB pages, CRC32 checksums, free-page recycling |
 | 🌳 | **B+ Tree indexing** | Ordered key/value store, cursor-based range scans, lazy leaf traversal |
-| 📝 | **SQL parser** | `SELECT`, `INSERT`, `DELETE`, `UPDATE`, `CREATE TABLE`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`, `JOIN` |
+| 📝 | **SQL parser** | `SELECT`, `INSERT`, `DELETE`, `UPDATE`, `CREATE TABLE`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`, `JOIN`, `IN`, `EXISTS` |
 | 🔒 | **WAL & crash recovery** | Write-ahead log, no-steal/force policy, REDO-only recovery |
 | ♻️ | **Buffer pool** | Shared LRU page cache, pool hit/miss statistics |
 | 📊 | **Cost-based optimizer** | Column statistics, cardinality estimates, index vs. full-scan selection |
@@ -42,6 +42,7 @@ The result is a working database that can execute multi-table SQL queries, survi
 | 🔌 | **TCP server** | Length-prefixed JSON wire protocol, concurrent connections, graceful shutdown |
 | ✏️ | **DELETE & UPDATE** | MVCC-aware row deletion and update, secondary index maintenance, two-phase scan |
 | 📈 | **Aggregates** | `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `GROUP BY`, `HAVING`, `ORDER BY` with LIMIT |
+| 🔍 | **Subqueries** | `IN (list)`, `NOT IN`, `IN (SELECT …)`, `NOT IN (SELECT …)`, `EXISTS`, `NOT EXISTS`, scalar subqueries on WHERE RHS |
 
 ---
 
@@ -123,7 +124,7 @@ go build ./...
 go test ./...
 ```
 
-Expected output (288 tests, all packages):
+Expected output (308 tests, all packages):
 
 ```
 ok  github.com/yahya/db-engine/btree
@@ -161,6 +162,9 @@ db> DELETE FROM users WHERE id = 2;
 db> SELECT COUNT(*), AVG(age), MIN(age), MAX(age) FROM users;
 db> SELECT name, age FROM users ORDER BY age ASC LIMIT 2;
 db> SELECT u.name, o.amount FROM users u JOIN orders o ON u.id = o.user_id;
+db> SELECT name FROM users WHERE id IN (SELECT user_id FROM orders WHERE amount > 100);
+db> SELECT name FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE orders.user_id = users.id);
+db> SELECT name FROM users WHERE age > (SELECT AVG(age) FROM users);
 db> EXPLAIN SELECT * FROM users WHERE id = 1;
 db> BEGIN;
 db> INSERT INTO users VALUES (4, 'Dave', 22);
@@ -327,6 +331,7 @@ connection — each connection goroutine owns its own MVCC transaction slot.
 | 13 | ✅ Done | Network — TCP server, wire protocol |
 | 14 | ✅ Done | DML — DELETE and UPDATE |
 | 15 | ✅ Done | Aggregates — COUNT/SUM/AVG/MIN/MAX, GROUP BY, HAVING, ORDER BY |
+| 16 | ✅ Done | Subqueries — IN (list/subquery), NOT IN, EXISTS, NOT EXISTS, scalar subqueries |
 
 ---
 

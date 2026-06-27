@@ -273,8 +273,16 @@ func (db *DB) Exec(sql string) (*Result, error) {
 	case *query.InsertStmt:
 		return db.execInsert(s)
 	case *query.DeleteStmt:
+		// Flatten subqueries in WHERE before acquiring the write lock — the inner
+		// SELECT executions need RLock which is incompatible with Lock.
+		if err := db.flattenDMLSubqueries(s.Where); err != nil {
+			return nil, err
+		}
 		return db.execDelete(s)
 	case *query.UpdateStmt:
+		if err := db.flattenDMLSubqueries(s.Where); err != nil {
+			return nil, err
+		}
 		return db.execUpdate(s)
 	case *query.CreateTableStmt:
 		db.mu.Lock()
@@ -728,14 +736,20 @@ func (db *DB) insertIntoIndexes(tbl *catalog.Table, values []catalog.Value, pk u
 // --- SELECT ---
 
 func (db *DB) execSelect(s *query.SelectStmt) (*Result, error) {
-	// For an explicit transaction, re-use the snapshot taken at BEGIN so the
-	// transaction sees a consistent view across all its statements.
+	// Determine the MVCC snapshot for this query.
+	var snap mvcc.Snapshot
 	if tx := db.goroutineTx(); tx != nil {
-		return db.execSelectWithSnap(s, tx.snap)
+		// Explicit transaction: re-use the snapshot taken at BEGIN so all
+		// statements in the transaction see a consistent view.
+		snap = tx.snap
+	} else {
+		// Auto-commit: take a fresh snapshot of currently committed XIDs.
+		snap = db.txMgr.TakeSnapshot(mvcc.XIDNone)
 	}
-	// Auto-commit SELECT: take a fresh snapshot of currently committed XIDs.
-	snap := db.txMgr.TakeSnapshot(mvcc.XIDNone)
-	return db.execSelectWithSnap(s, snap)
+	// Resolve subqueries BEFORE acquiring db.mu.RLock.  Each inner execSelectFlattened
+	// call acquires and releases its own RLock; by the time execSelectWithSnap runs
+	// here there is no risk of recursive lock acquisition.
+	return db.execSelectFlattened(s, snap)
 }
 
 func (db *DB) execSelectWithSnap(s *query.SelectStmt, snap mvcc.Snapshot) (*Result, error) {

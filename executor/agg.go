@@ -327,9 +327,19 @@ func rowMatchesHaving(row []catalog.Value, colIdx map[string]int, wc *query.Wher
 
 func andGroupMatchesHaving(row []catalog.Value, colIdx map[string]int, conds []query.Condition) (bool, error) {
 	for _, c := range conds {
+		if c.AlwaysFalse {
+			return false, nil
+		}
 		idx, ok := colIdx[strings.ToLower(c.Column)]
 		if !ok {
 			return false, fmt.Errorf("HAVING: column %q not found in output", c.Column)
+		}
+		if c.InList != nil {
+			found := inListContains(row[idx], c.InList)
+			if c.Negated == found {
+				return false, nil
+			}
+			continue
 		}
 		if !evalCond(row[idx], c) {
 			return false, nil

@@ -563,6 +563,11 @@ func compareVals(a, b catalog.Value, op query.CompareOp) bool {
 
 func evalPreds(row []catalog.Value, tbl *catalog.Table, preds []query.Condition) bool {
 	for _, cond := range preds {
+		// AlwaysFalse is injected by the subquery flattener (e.g. EXISTS on an
+		// empty result, or NOT IN on a non-empty result).
+		if cond.AlwaysFalse {
+			return false
+		}
 		if cond.IsJoinCond() {
 			continue // join conditions are handled by nlJoinOp, not filterOp
 		}
@@ -575,11 +580,31 @@ func evalPreds(row []catalog.Value, tbl *catalog.Table, preds []query.Condition)
 		if idx < 0 {
 			continue
 		}
+		// IN / NOT IN with a literal list (set directly or after subquery flattening).
+		if cond.InList != nil {
+			found := inListContains(row[idx], cond.InList)
+			// Pass when: (IN and found) or (NOT IN and not found)
+			// Fail when: Negated == found
+			if cond.Negated == found {
+				return false
+			}
+			continue
+		}
 		if !evalCond(row[idx], cond) {
 			return false
 		}
 	}
 	return true
+}
+
+// inListContains reports whether v equals any value in list.
+func inListContains(v catalog.Value, list []catalog.Value) bool {
+	for _, item := range list {
+		if compareVals(v, item, query.OpEq) {
+			return true
+		}
+	}
+	return false
 }
 
 func evalCond(v catalog.Value, cond query.Condition) bool {

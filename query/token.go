@@ -45,7 +45,10 @@ const (
 	TokSum     // SUM
 	TokAvg     // AVG
 	TokMin     // MIN
-	TokMax     // MAX
+	TokMax     // MAX  (keep last aggregate keyword — parseIdent lower/upper bound)
+	TokIn      // IN
+	TokNot     // NOT
+	TokExists  // EXISTS
 
 	// Literals
 	TokIdent  // unquoted identifier: table name, column name
